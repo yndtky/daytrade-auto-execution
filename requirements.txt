@@ -1,0 +1,15 @@
+yfinance>=0.2.40
+pandas>=2.2
+numpy>=1.26
+requests>=2.31
+beautifulsoup4>=4.12
+lxml>=5.2
+openpyxl>=3.1
+xlrd>=2.0
+streamlit>=1.36
+gspread>=6.1
+google-auth>=2.30
+truststore>=0.9
+python-dotenv>=1.0
+backtrader>=1.9.78.123
+matplotlib>=3.8

@@ -1,0 +1,13 @@
+data/pipeline_cache.db
+data/credentials.json
+data/universe_cache.csv
+data/nikkei225_cache.csv
+data/windows_ca_bundle.pem
+data/_*.txt
+data/*.log
+data/backtest_results/
+.env
+__pycache__/
+*.pyc
+.venv/
+venv/

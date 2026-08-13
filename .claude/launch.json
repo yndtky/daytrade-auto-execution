@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "dashboard",
+      "runtimeExecutable": "C:\\Users\\takuy\\OneDrive\\デスクトップ\\claude code作業フォルダ\\.venv\\Scripts\\python.exe",
+      "runtimeArgs": ["-m", "streamlit", "run", "C:\\Users\\takuy\\OneDrive\\デスクトップ\\claude code作業フォルダ\\daytrade-auto-execution\\dashboard\\app.py", "--server.headless=true"],
+      "port": 8501
+    }
+  ]
+}

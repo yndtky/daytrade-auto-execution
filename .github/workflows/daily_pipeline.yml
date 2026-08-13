@@ -1,0 +1,40 @@
+name: 日次シグナル計算
+
+# GitHub Actionsのcronは全てUTC。日本時間(JST=UTC+9)との対応:
+#   JST 7:00(朝) -> UTC 22:00(前日) ※UTC日曜22時〜木曜22時 = JST月〜金の朝にあたる
+# 注意: GitHub Actionsのスケジュール実行は指定時刻ちょうどではなく、数分〜(混雑時は
+# それ以上)遅れることがあります。時刻の厳密性が必要な処理ではないため許容しています。
+on:
+  schedule:
+    - cron: "0 22 * * 0-4"
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: 依存関係インストール
+        run: pip install -r requirements.txt
+
+      - name: パイプライン実行
+        run: python -m pipeline.run_daily
+
+      - name: クラウド公開用スナップショットを更新
+        run: cp data/pipeline_cache.db data/cloud_metrics.db
+
+      - name: スナップショットをコミット&プッシュ(ダッシュボード用)
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add data/cloud_metrics.db
+          git diff --cached --quiet && echo "変更なし" || git commit -m "chore: 指標データ更新 ($(date -u +%Y-%m-%dT%H:%M:%SZ))"
+          git push
