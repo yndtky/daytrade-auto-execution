@@ -44,6 +44,13 @@ class ShortlistStrategy(bt.Strategy):
         ("max_drawdown_pct", None),
         ("nikkei_crash_pct", None),
         ("beta_weighted_halt_pct", None),
+        # トレーリングストップ(2026-08-14追加、デフォルト無効=従来通り):
+        # Falseの場合、損切りラインは買値から固定(entry - atr_multiplier×ATR)のまま保有期間中
+        # 変わらない。Trueの場合、値段が上がるほど損切りラインも切り上がる(値段が下がっても
+        # 切り下がらない)ため、一度乗った含み益を守りやすい。ただし通常のブレでも早期決済され
+        # やすくなり、本来の利確ライン(risk_reward_ratio倍)まで伸びる勝ちトレードを途中で
+        # 切ってしまう可能性もある。バックテストで比較してから採用するかどうかを判断すること。
+        ("use_trailing_stop", False),
     )
 
     def __init__(self):
@@ -131,14 +138,27 @@ class ShortlistStrategy(bt.Strategy):
             if shares <= 0:
                 continue
 
-            self.buy_bracket(
-                data=d,
-                size=shares,
-                price=entry_price,
-                exectype=bt.Order.Market,
-                stopprice=stop,
-                limitprice=target,
-            )
+            if self.p.use_trailing_stop:
+                # 固定ラインと同じ幅(atr_multiplier×ATR)をトレール幅として使う(比較を公平にするため)。
+                # 値段が上がるほど損切りラインも切り上がり、下がっても切り下がらない。
+                self.buy_bracket(
+                    data=d,
+                    size=shares,
+                    price=entry_price,
+                    exectype=bt.Order.Market,
+                    stopexec=bt.Order.StopTrail,
+                    trailamount=entry_price - stop,
+                    limitprice=target,
+                )
+            else:
+                self.buy_bracket(
+                    data=d,
+                    size=shares,
+                    price=entry_price,
+                    exectype=bt.Order.Market,
+                    stopprice=stop,
+                    limitprice=target,
+                )
             self.pending.add(name)
             if industry is not None:
                 self.industry_position_count[industry] = self.industry_position_count.get(industry, 0) + 1

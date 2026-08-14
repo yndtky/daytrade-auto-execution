@@ -84,6 +84,10 @@ def parse_args() -> argparse.Namespace:
         "--beta_weighted_halt_pct", type=float, default=None,
         help="保有銘柄のβで加重した日経急落の想定インパクトがこの%%以上のマイナスなら新規エントリーを停止(未指定なら無効)",
     )
+    parser.add_argument(
+        "--trailing_stop", action="store_true",
+        help="損切りラインを買値固定ではなく、値段が上がるほど切り上がるトレーリングストップにする(未指定なら従来通り固定)",
+    )
     return parser.parse_args()
 
 
@@ -136,6 +140,7 @@ def run(
     max_drawdown_pct: float | None = None,
     nikkei_crash_pct: float | None = None,
     beta_weighted_halt_pct: float | None = None,
+    trailing_stop: bool = False,
 ) -> dict:
     print(f"価格データ取得中: {len(tickers)}銘柄 x {years}年...")
     t0 = time.time()
@@ -169,6 +174,8 @@ def run(
             strategy_kwargs["nikkei_crash_pct"] = nikkei_crash_pct
         if beta_weighted_halt_pct is not None:
             strategy_kwargs["beta_weighted_halt_pct"] = beta_weighted_halt_pct
+    if trailing_stop:
+        strategy_kwargs["use_trailing_stop"] = True
 
     t0 = time.time()
     result = run_backtest_on_signals(signals_by_ticker, capital, commission_pct, slippage_pct, strategy_kwargs)
@@ -295,6 +302,7 @@ def main() -> None:
         max_drawdown_pct=args.max_drawdown_pct,
         nikkei_crash_pct=args.nikkei_crash_pct,
         beta_weighted_halt_pct=args.beta_weighted_halt_pct,
+        trailing_stop=args.trailing_stop,
     )
     print_summary(result)
     save_outputs(result, result["tickers"], args.years)

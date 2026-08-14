@@ -61,6 +61,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max_drawdown_pct", type=float, default=None, help="口座ドローダウンによる新規エントリー停止しきい値")
     parser.add_argument("--nikkei_crash_pct", type=float, default=None, help="日経急落による新規エントリー停止しきい値")
     parser.add_argument("--beta_weighted_halt_pct", type=float, default=None, help="β加重想定インパクトによる新規エントリー停止しきい値")
+    parser.add_argument(
+        "--trailing_stop", action="store_true",
+        help="損切りラインを買値固定ではなく、値段が上がるほど切り上がるトレーリングストップにする",
+    )
     parser.add_argument("--sweep", action="store_true", help="ATR倍率・リスクリワード比の感度分析を行う")
     parser.add_argument(
         "--rolling_folds", type=int, default=None,
@@ -317,6 +321,8 @@ def main() -> None:
         strategy_kwargs["risk_pct"] = args.risk_pct
     if args.lot_size is not None:
         strategy_kwargs["lot_size"] = args.lot_size
+    if args.trailing_stop:
+        strategy_kwargs["use_trailing_stop"] = True
 
     # 業種分散は「複数銘柄を同時に保有する」という概念があって初めて意味を持つため、
     # 銘柄ごとに独立した口座で回すプール方式(run_pooled_split_check)には渡さない。
