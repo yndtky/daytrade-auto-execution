@@ -229,6 +229,14 @@ def run(today: str | None = None, production: bool = False, base_url: str | None
     # 外部資料の指摘で気づいた実在のリスク)。
     pending_or_holding_tickers = set(storage.read_open_positions()["ticker"])
 
+    # リスクベースのサイジング(rm.position_size_shares)は口座評価額(account_value、
+    # 保有株の含み評価額も含む)を基準にするが、実際に新規注文へ使える予算は現金(cash)のみ。
+    # この現金予算は1回の実行で複数銘柄にエントリーするたびに減っていくはずなのに、
+    # 元のコードはaccount_valueを固定のまま使い回しており、2件目以降のサイジングが
+    # 「まだ満額残っている」前提のままになっていた(2026-08-14、外部資料の指摘で発見した
+    # 実在のバグ)。remaining_cashで実際に使える予算を追跡し、発注のたびに差し引く。
+    remaining_cash = cash
+
     for _, row in shortlist.iterrows():
         ticker = str(row["ticker"])
         if ticker in held_tickers or ticker in pending_or_holding_tickers:
@@ -250,6 +258,9 @@ def run(today: str | None = None, production: bool = False, base_url: str | None
         stop = rm.stop_loss_price(entry_price, atr)
         target = rm.take_profit_price(entry_price, stop)
         shares = rm.position_size_shares(account_value, RISK_PCT, entry_price, stop, LOT_SIZE)
+        # リスクベースの株数を、その時点で実際に残っている現金予算でさらに制限する
+        affordable_shares = int(remaining_cash // entry_price // LOT_SIZE) * LOT_SIZE
+        shares = min(shares, affordable_shares)
         if shares <= 0:
             continue
 
@@ -258,9 +269,10 @@ def run(today: str | None = None, production: bool = False, base_url: str | None
             order_id = order.get("OrderId")
             storage.log_order(today, ticker, "BUY", shares, entry_price, order_id, "SENT")
             storage.open_position(ticker, today, order_id, shares, entry_price, stop, target)
+            remaining_cash -= shares * entry_price
             print(
                 f"発注: 買い {ticker} {shares}株 @ {entry_price}円(注文ID: {order_id}、"
-                f"損切り予定{stop:.0f}円/利確予定{target:.0f}円)"
+                f"損切り予定{stop:.0f}円/利確予定{target:.0f}円、残り予算{remaining_cash:,.0f}円)"
             )
             if industry:
                 industry_position_count[industry] = industry_position_count.get(industry, 0) + 1
@@ -271,5 +283,24 @@ def run(today: str | None = None, production: bool = False, base_url: str | None
     print("=== live_trading 実行完了 ===")
 
 
+def run_safely(today: str | None = None, production: bool = False, base_url: str | None = None) -> None:
+    """run()を例外から保護するラッパー。予期しないエラーで異常終了しても、
+    その日の失敗をdaily_runsに記録してから再送出する(2026-08-14、外部資料の指摘を受けて追加。
+    元のrun()は例外発生時にstorage.log_daily_run()を一度も呼ばずに落ちるため、後から
+    「その日は何が起きて止まったのか」が記録に残らなかった)。
+    """
+    run_date = today or dt.date.today().isoformat()
+    try:
+        run(today=run_date, production=production, base_url=base_url)
+    except Exception as e:  # noqa: BLE001
+        print(f"⚠ live_trading実行中に予期しないエラーで停止: {e}")
+        try:
+            peak_value = storage.peak_value_so_far()
+            storage.log_daily_run(run_date, peak_value, peak_value, True, f"異常終了: {e}")
+        except Exception:  # noqa: BLE001
+            pass  # 記録自体に失敗しても、元の例外を握りつぶさず必ず再送出する
+        raise
+
+
 if __name__ == "__main__":
-    run(production=False)
+    run_safely(production=False)
