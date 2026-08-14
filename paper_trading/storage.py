@@ -33,6 +33,14 @@ CREATE TABLE IF NOT EXISTS orders (
     status TEXT,
     raw_response TEXT
 );
+CREATE TABLE IF NOT EXISTS account_snapshots (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    timestamp TEXT NOT NULL,
+    account_value REAL,
+    peak_value REAL,
+    halted INTEGER,
+    halt_reason TEXT
+);
 """
 
 
@@ -102,6 +110,33 @@ def read_orders(limit: int = 200) -> pd.DataFrame:
     with _read_connect() as conn:
         return pd.read_sql(
             "SELECT * FROM orders ORDER BY timestamp DESC LIMIT ?", conn, params=(limit,)
+        )
+
+
+def peak_value_so_far() -> float:
+    """これまでに記録された口座評価額の最大値。記録がなければ0(=初回実行時)。
+    live_trading/storage.pyの同名関数と同じ考え方(サーキットブレーカーのドローダウン判定用)。
+    """
+    with _read_connect() as conn:
+        row = conn.execute("SELECT MAX(peak_value) FROM account_snapshots").fetchone()
+        return float(row[0]) if row and row[0] is not None else 0.0
+
+
+def log_account_snapshot(account_value: float, peak_value: float, halted: bool, halt_reason: str | None) -> None:
+    import datetime as dt
+
+    with _connect() as conn:
+        conn.execute(
+            "INSERT INTO account_snapshots (timestamp, account_value, peak_value, halted, halt_reason) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (dt.datetime.now(dt.timezone.utc).isoformat(), account_value, peak_value, int(halted), halt_reason),
+        )
+
+
+def read_account_snapshots(limit: int = 200) -> pd.DataFrame:
+    with _read_connect() as conn:
+        return pd.read_sql(
+            "SELECT * FROM account_snapshots ORDER BY timestamp DESC LIMIT ?", conn, params=(limit,)
         )
 
 

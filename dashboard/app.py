@@ -596,21 +596,30 @@ try:
 
     cycles = paper_storage.read_cycles(limit=200)
     orders = paper_storage.read_orders(limit=200)
+    snapshots = paper_storage.read_account_snapshots(limit=200)
 except Exception as e:  # noqa: BLE001
-    cycles, orders = None, None
+    cycles, orders, snapshots = None, None, None
     st.caption(f"ペーパートレードのデータをまだ読み込めません(未実行、または読み込みエラー: {e})。")
 
 if cycles is not None:
     if cycles.empty:
         st.caption("まだ実行履歴がありません。GitHub Actionsの初回実行を待つか、手動実行してください。")
     else:
-        pc1, pc2, pc3, pc4 = st.columns(4)
+        pc1, pc2, pc3, pc4, pc5 = st.columns(5)
         pc1.metric("実行サイクル数", len(cycles))
         pc2.metric("発注件数", len(orders) if orders is not None else 0)
         error_count = cycles["error"].notna().sum()
         pc3.metric("エラー件数", int(error_count))
         latest = cycles.iloc[0]
         pc4.metric("直近ポジション", latest.get("position_state") or "-")
+        if snapshots is not None and not snapshots.empty:
+            latest_snapshot = snapshots.iloc[0]
+            halted = bool(latest_snapshot.get("halted"))
+            pc5.metric("サーキットブレーカー", "停止中" if halted else "平常")
+            if halted:
+                st.warning(f"新規BUYを停止中(理由: {latest_snapshot.get('halt_reason')})")
+        else:
+            pc5.metric("サーキットブレーカー", "-")
 
         st.caption("実行履歴(新しい順)")
         st.dataframe(

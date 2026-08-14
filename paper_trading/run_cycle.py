@@ -24,10 +24,19 @@ from .strategy import MA_LONG_PERIOD, MA_SHORT_PERIOD, compute_moving_averages, 
 
 SYMBOL = "BTCUSDT"
 BASE_ASSET = "BTC"
+QUOTE_ASSET = "USDT"
 INTERVAL = "5m"
 KLINES_LIMIT = MA_LONG_PERIOD + 5  # 長期MA + クロス判定用の前時点1本 + 予備
 ORDER_QUANTITY = 0.001  # 固定の練習用数量(テストネットなので実際の金額的な意味はない)
 POSITION_DUST_THRESHOLD = ORDER_QUANTITY * 0.1  # これ未満の残高は「ポジションなし」とみなす
+
+# サーキットブレーカー(2026-08-14追加): このフェーズの目的は「戦略の質」ではなく
+# 「発注・エラー処理・状態管理の仕組みの堅牢性」の検証だが、live_trading/backtestと同じ
+# 「口座評価額がピークから大きく下がったら新規エントリーを停止する」仕組み自体もテスト対象に
+# 含める(3つのシステムで一貫した設計にしておく)。テストネットの実資金は動かないため、
+# しきい値はJP株側ほど厳密に調整していない(BTCは短時間でも値動きが大きいため、あくまで
+# 「仕組みが正しく発動・記録されるか」を確認できる程度の値を置いている)。
+MAX_DRAWDOWN_PCT = 20.0
 
 
 def reconcile_position_state() -> tuple[bool, float]:
@@ -50,6 +59,16 @@ def reconcile_position_state() -> tuple[bool, float]:
     return in_position, own_position
 
 
+def check_halt(account_value: float) -> tuple[bool, str | None]:
+    """新規BUYを停止すべきか判定する(SELLによるポジション解消は妨げない、live_trading/
+    backtestと同じ考え方)。"""
+    peak_value = max(storage.peak_value_so_far(), account_value)
+    drawdown_pct = (account_value - peak_value) / peak_value * 100 if peak_value else 0.0
+    if drawdown_pct <= -MAX_DRAWDOWN_PCT:
+        return True, f"口座評価額ドローダウン{drawdown_pct:.1f}%"
+    return False, None
+
+
 def run() -> None:
     try:
         klines = get_klines(SYMBOL, INTERVAL, limit=KLINES_LIMIT)
@@ -62,14 +81,26 @@ def run() -> None:
         in_position, own_position_qty = reconcile_position_state()
         remote_state = "IN_POSITION" if in_position else "FLAT"
 
+        account_value = get_account_balance(QUOTE_ASSET) + own_position_qty * current_price
+        halted, halt_reason = check_halt(account_value)
+        peak_value = max(storage.peak_value_so_far(), account_value)
+        storage.log_account_snapshot(account_value, peak_value, halted, halt_reason)
+
         action = decide_action(ma_short, ma_long, prev_ma_short, prev_ma_long, in_position)
         print(
             f"{SYMBOL}: 価格={current_price} MA{MA_SHORT_PERIOD}={ma_short} MA{MA_LONG_PERIOD}={ma_long} "
-            f"ポジション={remote_state} 判定={action}"
+            f"ポジション={remote_state} 判定={action} 口座評価額={account_value:.2f}{QUOTE_ASSET}"
         )
 
         if action == "HOLD":
             storage.log_cycle(SYMBOL, "HOLD", current_price, ma_short, ma_long, remote_state)
+            return
+
+        if action == "BUY" and halted:
+            storage.log_cycle(
+                SYMBOL, "BUY_HALTED", current_price, ma_short, ma_long, remote_state, note=halt_reason
+            )
+            print(f"⚠ 新規BUYを停止(理由: {halt_reason})")
             return
 
         side = "BUY" if action == "BUY" else "SELL"
