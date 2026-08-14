@@ -65,6 +65,11 @@ def parse_args() -> argparse.Namespace:
         "--trailing_stop", action="store_true",
         help="損切りラインを買値固定ではなく、値段が上がるほど切り上がるトレーリングストップにする",
     )
+    parser.add_argument("--correlation_window", type=int, default=None, help="相関ベース分散の計算に使う日数")
+    parser.add_argument(
+        "--max_avg_correlation", type=float, default=None,
+        help="新規候補と保有中銘柄群との平均相関がこれを超えたら見送る(0〜1)",
+    )
     parser.add_argument("--sweep", action="store_true", help="ATR倍率・リスクリワード比の感度分析を行う")
     parser.add_argument(
         "--rolling_folds", type=int, default=None,
@@ -332,6 +337,9 @@ def main() -> None:
 
         shared_kwargs["industry_by_ticker"] = get_industry_map()
         shared_kwargs["max_positions_per_industry"] = args.max_positions_per_industry
+    if args.correlation_window is not None and args.max_avg_correlation is not None:
+        shared_kwargs["correlation_window"] = args.correlation_window
+        shared_kwargs["max_avg_correlation"] = args.max_avg_correlation
     if args.max_drawdown_pct is not None:
         shared_kwargs["max_drawdown_pct"] = args.max_drawdown_pct
     if args.nikkei_crash_pct is not None or args.beta_weighted_halt_pct is not None:

@@ -15,6 +15,7 @@ risk_managementの「1トレードあたりの許容損失額」ルールで都�
 """
 
 import backtrader as bt
+import numpy as np
 
 from pipeline import risk_management as rm
 
@@ -51,6 +52,14 @@ class ShortlistStrategy(bt.Strategy):
         # やすくなり、本来の利確ライン(risk_reward_ratio倍)まで伸びる勝ちトレードを途中で
         # 切ってしまう可能性もある。バックテストで比較してから採用するかどうかを判断すること。
         ("use_trailing_stop", False),
+        # 相関ベースの分散(2026-08-14追加、デフォルト無効): 業種分散(カテゴリ的な近さ)を
+        # 補完する、値動き(連続的な近さ)による判断。新規候補と「現在保有中の各銘柄」の
+        # トレーリングcorrelation_window日リターンのピアソン相関を計算し、平均相関が
+        # max_avg_correlationを超える候補は見送る(同じ方向に一斉に動きやすい銘柄ばかり
+        # 集めることを避ける狙い)。IKEDAさんの「分散の質・共分散構造を重視すべき」という
+        # 指摘を受けた、業種分散に続く2つ目の分散手法。業種分散と独立に併用できる。
+        ("correlation_window", None),
+        ("max_avg_correlation", None),
     )
 
     def __init__(self):
@@ -73,6 +82,38 @@ class ShortlistStrategy(bt.Strategy):
                 total_value += value
                 weighted_beta += value * float(d.beta[0])
         return weighted_beta / total_value if total_value else 0.0
+
+    def _trailing_returns(self, d) -> np.ndarray | None:
+        window = self.p.correlation_window
+        if len(d) < window + 1:
+            return None
+        closes = np.array(d.close.get(size=window + 1))
+        if len(closes) < window + 1 or np.any(closes <= 0):
+            return None
+        return np.diff(closes) / closes[:-1]
+
+    def _avg_correlation_with_holdings(self, d) -> float | None:
+        """dの直近correlation_window日リターンと、現在保有中の各銘柄のリターンとの平均相関。
+        保有銘柄が無い、またはデータ不足で計算できなければNone(判定を素通りさせる)。
+        """
+        held = [h for h in self.datas if h._name != d._name and self.getposition(h).size]
+        if not held:
+            return None
+
+        d_returns = self._trailing_returns(d)
+        if d_returns is None or np.std(d_returns) == 0:
+            return None
+
+        correlations = []
+        for h in held:
+            h_returns = self._trailing_returns(h)
+            if h_returns is None or np.std(h_returns) == 0:
+                continue
+            corr = np.corrcoef(d_returns, h_returns)[0, 1]
+            if not np.isnan(corr):
+                correlations.append(corr)
+
+        return float(np.mean(correlations)) if correlations else None
 
     def _check_halt_new_entries(self, today: str) -> bool:
         """新規エントリーを停止すべきか判定する(既存ポジションの決済には影響しない)。"""
@@ -125,6 +166,11 @@ class ShortlistStrategy(bt.Strategy):
                 and self.industry_position_count.get(industry, 0) >= self.p.max_positions_per_industry
             ):
                 continue  # 同じ業種を規定数以上すでに保有中(または注文中)なので見送る
+
+            if self.p.correlation_window is not None and self.p.max_avg_correlation is not None:
+                avg_corr = self._avg_correlation_with_holdings(d)
+                if avg_corr is not None and avg_corr > self.p.max_avg_correlation:
+                    continue  # 保有中の銘柄群と値動きが似すぎているので見送る
 
             entry_price = float(d.close[0])
             atr = float(d.atr14[0])

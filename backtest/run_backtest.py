@@ -88,6 +88,14 @@ def parse_args() -> argparse.Namespace:
         "--trailing_stop", action="store_true",
         help="損切りラインを買値固定ではなく、値段が上がるほど切り上がるトレーリングストップにする(未指定なら従来通り固定)",
     )
+    parser.add_argument(
+        "--correlation_window", type=int, default=None,
+        help="相関ベース分散の計算に使う日数(例: 60)。--max_avg_correlationとセットで指定",
+    )
+    parser.add_argument(
+        "--max_avg_correlation", type=float, default=None,
+        help="新規候補と保有中銘柄群との平均相関がこれを超えたら見送る(0〜1、例: 0.7)。--correlation_windowとセットで指定",
+    )
     return parser.parse_args()
 
 
@@ -141,6 +149,8 @@ def run(
     nikkei_crash_pct: float | None = None,
     beta_weighted_halt_pct: float | None = None,
     trailing_stop: bool = False,
+    correlation_window: int | None = None,
+    max_avg_correlation: float | None = None,
 ) -> dict:
     print(f"価格データ取得中: {len(tickers)}銘柄 x {years}年...")
     t0 = time.time()
@@ -176,6 +186,9 @@ def run(
             strategy_kwargs["beta_weighted_halt_pct"] = beta_weighted_halt_pct
     if trailing_stop:
         strategy_kwargs["use_trailing_stop"] = True
+    if correlation_window is not None and max_avg_correlation is not None:
+        strategy_kwargs["correlation_window"] = correlation_window
+        strategy_kwargs["max_avg_correlation"] = max_avg_correlation
 
     t0 = time.time()
     result = run_backtest_on_signals(signals_by_ticker, capital, commission_pct, slippage_pct, strategy_kwargs)
@@ -303,6 +316,8 @@ def main() -> None:
         nikkei_crash_pct=args.nikkei_crash_pct,
         beta_weighted_halt_pct=args.beta_weighted_halt_pct,
         trailing_stop=args.trailing_stop,
+        correlation_window=args.correlation_window,
+        max_avg_correlation=args.max_avg_correlation,
     )
     print_summary(result)
     save_outputs(result, result["tickers"], args.years)
