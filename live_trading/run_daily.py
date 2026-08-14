@@ -104,7 +104,13 @@ def reconcile_entry_fills(client: KabuStationClient, today: str) -> None:
 
 
 def reconcile_exit_fills(client: KabuStationClient, today: str) -> None:
-    """holding中のポジションについて、損切り・利確のどちらかが約定していればもう一方をキャンセルする(疑似OCO)。"""
+    """holding中のポジションについて、損切り・利確のどちらかが約定していればもう一方をキャンセルする(疑似OCO)。
+
+    client.pyの損切り・利確注文はどちらもExpireDay=0(当日限り)で出しているため、その日のうちに
+    約定しなければ翌日には自動的に失効し、ポジションが決済注文の無い無防備な状態になる
+    (2026-08-15、外部資料の指摘で気づいた実在のバグ)。両方とも失効・未約定と判定した場合は、
+    同じ価格で決済注文を出し直す。
+    """
     holding = storage.read_open_positions()
     holding = holding[holding["status"] == "holding"]
     if holding.empty:
@@ -115,6 +121,10 @@ def reconcile_exit_fills(client: KabuStationClient, today: str) -> None:
     def _is_filled(order_id: str) -> bool:
         order = orders_by_id.get(order_id)
         return order is not None and order.get("State") == ORDER_STATE_FINISHED and int(order.get("CumQty", 0)) > 0
+
+    def _is_expired_unfilled(order_id: str) -> bool:
+        order = orders_by_id.get(order_id)
+        return order is not None and order.get("State") == ORDER_STATE_FINISHED and int(order.get("CumQty", 0)) == 0
 
     for _, pos in holding.iterrows():
         stop_filled = _is_filled(pos["stop_order_id"])
@@ -139,6 +149,17 @@ def reconcile_exit_fills(client: KabuStationClient, today: str) -> None:
                 print(f"⚠ {pos['ticker']}: 損切り注文のキャンセル失敗(手動確認が必要): {e}")
             storage.close_position(pos["id"], today, "target_hit")
             print(f"利確約定: {pos['ticker']}(損切り注文はキャンセル)")
+        elif _is_expired_unfilled(pos["stop_order_id"]) and _is_expired_unfilled(pos["target_order_id"]):
+            try:
+                new_stop = client.send_cash_sell_stop_order(pos["ticker"], int(pos["filled_qty"]), pos["stop_price"])
+                new_target = client.send_cash_sell_order(pos["ticker"], int(pos["filled_qty"]), pos["target_price"])
+                new_stop_id, new_target_id = new_stop.get("OrderId"), new_target.get("OrderId")
+                storage.mark_position_holding(pos["id"], int(pos["filled_qty"]), new_stop_id, new_target_id)
+                storage.log_order(today, pos["ticker"], "SELL_STOP", int(pos["filled_qty"]), pos["stop_price"], new_stop_id, "SENT", note="前日分の失効により再発注")
+                storage.log_order(today, pos["ticker"], "SELL_TARGET", int(pos["filled_qty"]), pos["target_price"], new_target_id, "SENT", note="前日分の失効により再発注")
+                print(f"⚠ {pos['ticker']}: 決済注文が期限切れだったため再発注(損切り{pos['stop_price']:.0f}円/利確{pos['target_price']:.0f}円)")
+            except KabuStationError as e:
+                print(f"⚠⚠ {pos['ticker']}: 決済注文の再発注に失敗。ポジションが無防備な状態です。手動確認が必要: {e}")
 
 
 def check_halt(account_value: float, nikkei_return: float, portfolio_beta: float) -> tuple[bool, str | None]:
