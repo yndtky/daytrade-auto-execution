@@ -79,6 +79,7 @@ def run_backtest_on_signals(
         "start_value": start_value,
         "end_value": end_value,
         "injections": strat.injection_log,
+        "halt_log": strat.halt_log,
         "strategy": strat,
         "trades_analysis": strat.analyzers.trades.get_analysis(),
         "drawdown": strat.analyzers.dd.get_analysis(),

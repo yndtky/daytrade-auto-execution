@@ -33,6 +33,17 @@ class ShortlistStrategy(bt.Strategy):
         # 空、または該当銘柄の業種が不明な場合は制限しない(後方互換のためデフォルト無効)。
         ("industry_by_ticker", {}),
         ("max_positions_per_industry", None),
+        # ポートフォリオ全体のリスク管理(3層構成、すべて未指定なら従来通り無効):
+        #  1) 口座評価額がピークからmax_drawdown_pct%以上下がったら新規エントリーを停止
+        #  2) 日経平均の当日リターンがnikkei_crash_pct%以下なら新規エントリーを停止
+        #     (βの前提が崩れる暴落時のための、単純な安全網。βに関係なく機械的に発動する)
+        #  3) 保有銘柄のβで加重した「日経急落の想定インパクト」がbeta_weighted_halt_pct%以下
+        #     なら新規エントリーを停止(高β銘柄ばかり持っている時ほど早く反応する)
+        # いずれも「既存ポジションのATR損切り/利確」は止めない。新規エントリーだけを止める。
+        ("nikkei_returns", {}),  # {"YYYY-MM-DD": 当日リターン(%)}
+        ("max_drawdown_pct", None),
+        ("nikkei_crash_pct", None),
+        ("beta_weighted_halt_pct", None),
     )
 
     def __init__(self):
@@ -42,6 +53,44 @@ class ShortlistStrategy(bt.Strategy):
         self._pending_injections = dict(self.p.cash_injections)  # 消化済みは都度popする
         self.injection_log = []  # 実際に入金した(日付, 金額)の記録
         self.industry_position_count = {}  # 業種名 -> 現在保有中(建玉待ち含む)のポジション数
+        self.peak_value = None  # ポートフォリオ評価額の過去最高値(ドローダウン判定用)
+        self.halt_log = []  # 新規エントリーを停止した日の記録(理由付き)
+
+    def _portfolio_beta(self) -> float:
+        """現在保有中のポジションを、時価で加重平均したβ。ポジションが無ければ0を返す。"""
+        total_value, weighted_beta = 0.0, 0.0
+        for d in self.datas:
+            size = self.getposition(d).size
+            if size:
+                value = abs(size * float(d.close[0]))
+                total_value += value
+                weighted_beta += value * float(d.beta[0])
+        return weighted_beta / total_value if total_value else 0.0
+
+    def _check_halt_new_entries(self, today: str) -> bool:
+        """新規エントリーを停止すべきか判定する(既存ポジションの決済には影響しない)。"""
+        value = self.broker.getvalue()
+        self.peak_value = value if self.peak_value is None else max(self.peak_value, value)
+
+        if self.p.max_drawdown_pct is not None:
+            drawdown_pct = (value - self.peak_value) / self.peak_value * 100 if self.peak_value else 0.0
+            if drawdown_pct <= -self.p.max_drawdown_pct:
+                self.halt_log.append((today, f"口座ドローダウン{drawdown_pct:.1f}%"))
+                return True
+
+        nikkei_return = self.p.nikkei_returns.get(today)
+        if nikkei_return is not None:
+            if self.p.nikkei_crash_pct is not None and nikkei_return <= -self.p.nikkei_crash_pct:
+                self.halt_log.append((today, f"日経急落{nikkei_return:.1f}%"))
+                return True
+
+            if self.p.beta_weighted_halt_pct is not None:
+                estimated_impact = self._portfolio_beta() * nikkei_return
+                if estimated_impact <= -self.p.beta_weighted_halt_pct:
+                    self.halt_log.append((today, f"β加重想定インパクト{estimated_impact:.1f}%"))
+                    return True
+
+        return False
 
     def next(self):
         today = self.datas[0].datetime.date(0).isoformat()
@@ -49,6 +98,9 @@ class ShortlistStrategy(bt.Strategy):
         if amount:
             self.broker.add_cash(amount)
             self.injection_log.append((today, amount))
+
+        if self._check_halt_new_entries(today):
+            return  # 新規エントリーのみ停止。既存ポジションのブラケット注文(損切り/利確)は生きたまま
 
         for d in self.datas:
             name = d._name

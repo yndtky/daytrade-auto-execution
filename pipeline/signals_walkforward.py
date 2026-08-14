@@ -94,6 +94,22 @@ def golden_cross_recent_series(
     return (gap > 0) & (gap_before < 0)
 
 
+def beta_series(close: pd.Series, index_close: pd.Series, window: int = ind.BETA_WINDOW) -> pd.Series:
+    """日経平均に対するβのローリング版(indicators.beta_and_correlationの単一値版と同じ定義)。
+
+    ポートフォリオ全体のリスク管理(保有銘柄のβで重み付けした、日経急落時の想定インパクト)に使う。
+    pandasのrolling().cov()/rolling().var()はどちらもC実装で高速なため、_rolling_slopeのときのような
+    独自の閉形式最適化は不要(素直な実装のままで十分速い)。
+    """
+    stock_ret = close.pct_change()
+    index_ret = index_close.reindex(close.index).pct_change()
+    covariance = stock_ret.rolling(window).cov(index_ret)
+    variance = index_ret.rolling(window).var()
+    with np.errstate(divide="ignore", invalid="ignore"):
+        beta = covariance / variance
+    return beta.replace([np.inf, -np.inf], np.nan)
+
+
 def liquidity_ok_series(
     close: pd.Series,
     volume: pd.Series,
@@ -104,7 +120,9 @@ def liquidity_ok_series(
     return turnover >= min_turnover
 
 
-def compute_all_signals(df: pd.DataFrame, min_signals: int | None = None) -> pd.DataFrame:
+def compute_all_signals(
+    df: pd.DataFrame, min_signals: int | None = None, index_close: pd.Series | None = None
+) -> pd.DataFrame:
     """OHLCV DataFrame(日付昇順、列: Open/High/Low/Close/Volume)から、全期間ぶんの指標・
     エントリーシグナルをDataFrameで返す(各行はその日までのデータのみで計算、未来参照なし)。
 
@@ -112,6 +130,10 @@ def compute_all_signals(df: pd.DataFrame, min_signals: int | None = None) -> pd.
     うちmin_signals個以上が成立)。min_signals未指定時は本番の「本日の注目銘柄」判定と
     同じ screen.MIN_SIGNALS(=2)を使うが、バックテストで条件の厳しさを変えて検証したい
     場合はここで上書きできる(小口座では候補を絞って質を優先したい、等の検証用)。
+
+    index_close(日経平均の終値)を渡すと、beta列(日経に対するβのローリング値)も計算する。
+    渡さない場合はbeta列は1.0で埋める(=市場平均並みという中立的な仮定、ポートフォリオ全体の
+    リスク管理機能を使わないバックテストでは計算コストをかけない)。
     """
     min_signals = screen.MIN_SIGNALS if min_signals is None else min_signals
     close, volume = df["Close"], df["Volume"]
@@ -132,6 +154,11 @@ def compute_all_signals(df: pd.DataFrame, min_signals: int | None = None) -> pd.
     out["liquidity_ok"] = liquidity_ok_series(close, volume)
     out["atr14"] = ind.compute_atr(df["High"], df["Low"], close)
 
+    if index_close is not None:
+        out["beta"] = beta_series(close, index_close)
+    else:
+        out["beta"] = 1.0
+
     for flag_col in ["rsi_flag", "obv_divergence_flag", "golden_cross_flag", "uptrend_turning_flag", "liquidity_ok"]:
         out[flag_col] = out[flag_col].fillna(False)
 
@@ -139,5 +166,6 @@ def compute_all_signals(df: pd.DataFrame, min_signals: int | None = None) -> pd.
     out["entry_signal"] = (out["liquidity_ok"] & (signal_count >= min_signals)).astype(float)
     out["atr14"] = out["atr14"].ffill().fillna(0.0)
     out["buy_pressure_score"] = out["buy_pressure_score"].fillna(0.0)
+    out["beta"] = out["beta"].ffill().fillna(1.0)
 
     return out

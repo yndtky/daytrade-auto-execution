@@ -28,9 +28,9 @@ import pandas as pd
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8")
 
-from .data import fetch_history_bulk
+from .data import fetch_history_bulk, fetch_nikkei_history
 from .engine import run_backtest_on_signals, summarize
-from .run_backtest import resolve_tickers
+from .run_backtest import nikkei_daily_returns, resolve_tickers
 from .signal_quality import run_pooled
 from pipeline import risk_management as rm
 from pipeline.signals_walkforward import compute_all_signals
@@ -58,6 +58,9 @@ def parse_args() -> argparse.Namespace:
         "--max_positions_per_industry", type=int, default=None,
         help="同じ業種を同時に保有できる上限ポジション数。未指定なら制限しない",
     )
+    parser.add_argument("--max_drawdown_pct", type=float, default=None, help="口座ドローダウンによる新規エントリー停止しきい値")
+    parser.add_argument("--nikkei_crash_pct", type=float, default=None, help="日経急落による新規エントリー停止しきい値")
+    parser.add_argument("--beta_weighted_halt_pct", type=float, default=None, help="β加重想定インパクトによる新規エントリー停止しきい値")
     parser.add_argument("--sweep", action="store_true", help="ATR倍率・リスクリワード比の感度分析を行う")
     parser.add_argument(
         "--rolling_folds", type=int, default=None,
@@ -295,11 +298,12 @@ def main() -> None:
     print(f"価格データ取得中: {len(tickers)}銘柄 x {args.years}年...")
     t0 = time.time()
     prices = fetch_history_bulk(tickers, args.years)
-    print(f"取得完了: {len(prices)}/{len(tickers)}銘柄 ({time.time() - t0:.0f}秒)")
+    nikkei = fetch_nikkei_history(args.years)
+    print(f"取得完了: {len(prices)}/{len(tickers)}銘柄 + 日経平均 ({time.time() - t0:.0f}秒)")
 
     t0 = time.time()
     signals_by_ticker = {
-        ticker: compute_all_signals(raw, args.min_signals)
+        ticker: compute_all_signals(raw, args.min_signals, index_close=nikkei["Close"])
         for ticker, raw in prices.items()
         if not raw.empty and len(raw) >= 60
     }
@@ -322,6 +326,14 @@ def main() -> None:
 
         shared_kwargs["industry_by_ticker"] = get_industry_map()
         shared_kwargs["max_positions_per_industry"] = args.max_positions_per_industry
+    if args.max_drawdown_pct is not None:
+        shared_kwargs["max_drawdown_pct"] = args.max_drawdown_pct
+    if args.nikkei_crash_pct is not None or args.beta_weighted_halt_pct is not None:
+        shared_kwargs["nikkei_returns"] = nikkei_daily_returns(nikkei)
+        if args.nikkei_crash_pct is not None:
+            shared_kwargs["nikkei_crash_pct"] = args.nikkei_crash_pct
+        if args.beta_weighted_halt_pct is not None:
+            shared_kwargs["beta_weighted_halt_pct"] = args.beta_weighted_halt_pct
 
     t0 = time.time()
     if args.rolling_folds:

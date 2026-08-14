@@ -26,10 +26,16 @@ import pandas as pd
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8")  # Windowsのコンソール既定コードページ(cp932)対策
 
-from .data import fetch_history_bulk
+from .data import fetch_history_bulk, fetch_nikkei_history
 from .engine import run_backtest_on_signals
 from pipeline.signals_walkforward import compute_all_signals
 from pipeline.universe import get_full_tse_universe, get_industry_map, get_prime_universe, get_standard_universe
+
+
+def nikkei_daily_returns(nikkei_df) -> dict:
+    """日経平均のOHLCVから {日付文字列: 当日リターン(%)} の辞書を作る。"""
+    returns = nikkei_df["Close"].pct_change() * 100
+    return {idx.date().isoformat(): float(v) for idx, v in returns.items() if pd.notna(v)}
 
 DEFAULT_TICKERS = ["7203", "6758", "9984", "8306", "6501"]  # 例示用(トヨタ/ソニーG/SBG/三菱UFJ/日立)
 OUTPUT_DIR = Path(__file__).resolve().parent.parent / "data" / "backtest_results"
@@ -65,6 +71,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--max_positions_per_industry", type=int, default=None,
         help="同じ業種(33業種区分)を同時に保有できる上限ポジション数。未指定なら制限しない",
+    )
+    parser.add_argument(
+        "--max_drawdown_pct", type=float, default=None,
+        help="口座評価額がピークからこの%%以上下がったら新規エントリーを停止(未指定なら無効)",
+    )
+    parser.add_argument(
+        "--nikkei_crash_pct", type=float, default=None,
+        help="日経平均の当日下落率がこの%%以上なら新規エントリーを停止(未指定なら無効)",
+    )
+    parser.add_argument(
+        "--beta_weighted_halt_pct", type=float, default=None,
+        help="保有銘柄のβで加重した日経急落の想定インパクトがこの%%以上のマイナスなら新規エントリーを停止(未指定なら無効)",
     )
     return parser.parse_args()
 
@@ -115,15 +133,21 @@ def run(
     min_signals: int | None = None,
     cash_injections: dict | None = None,
     max_positions_per_industry: int | None = None,
+    max_drawdown_pct: float | None = None,
+    nikkei_crash_pct: float | None = None,
+    beta_weighted_halt_pct: float | None = None,
 ) -> dict:
     print(f"価格データ取得中: {len(tickers)}銘柄 x {years}年...")
     t0 = time.time()
     prices = fetch_history_bulk(tickers, years)
-    print(f"取得完了: {len(prices)}/{len(tickers)}銘柄 ({time.time() - t0:.0f}秒)")
+    nikkei = fetch_nikkei_history(years)
+    print(f"取得完了: {len(prices)}/{len(tickers)}銘柄 + 日経平均 ({time.time() - t0:.0f}秒)")
 
     t0 = time.time()
     signals_by_ticker = {
-        ticker: compute_all_signals(raw, min_signals) for ticker, raw in prices.items() if not raw.empty and len(raw) >= 60
+        ticker: compute_all_signals(raw, min_signals, index_close=nikkei["Close"])
+        for ticker, raw in prices.items()
+        if not raw.empty and len(raw) >= 60
     }
     print(f"指標計算完了: {len(signals_by_ticker)}銘柄 ({time.time() - t0:.0f}秒)")
 
@@ -137,6 +161,14 @@ def run(
     if max_positions_per_industry is not None:
         strategy_kwargs["industry_by_ticker"] = get_industry_map()
         strategy_kwargs["max_positions_per_industry"] = max_positions_per_industry
+    if max_drawdown_pct is not None:
+        strategy_kwargs["max_drawdown_pct"] = max_drawdown_pct
+    if nikkei_crash_pct is not None or beta_weighted_halt_pct is not None:
+        strategy_kwargs["nikkei_returns"] = nikkei_daily_returns(nikkei)
+        if nikkei_crash_pct is not None:
+            strategy_kwargs["nikkei_crash_pct"] = nikkei_crash_pct
+        if beta_weighted_halt_pct is not None:
+            strategy_kwargs["beta_weighted_halt_pct"] = beta_weighted_halt_pct
 
     t0 = time.time()
     result = run_backtest_on_signals(signals_by_ticker, capital, commission_pct, slippage_pct, strategy_kwargs)
@@ -193,6 +225,15 @@ def print_summary(result: dict) -> None:
     print(f"平均利益(勝ちトレード): {avg_won:,.0f}円 / 平均損失(負けトレード): {avg_lost:,.0f}円")
     if sqn is not None:
         print(f"SQN: {sqn:.2f}")
+
+    halt_log = result.get("halt_log") or []
+    if halt_log:
+        print(f"新規エントリー停止(ポートフォリオ・リスク管理発動): {len(halt_log)}日")
+        for date_str, reason in halt_log[:10]:
+            print(f"  {date_str}: {reason}")
+        if len(halt_log) > 10:
+            print(f"  ...他{len(halt_log) - 10}日")
+
     print("※ 過去データ上のシミュレーション結果であり、将来の利益を保証するものではない。")
 
 
@@ -251,6 +292,9 @@ def main() -> None:
         min_signals=args.min_signals,
         cash_injections=parse_cash_injections(args.cash_injection),
         max_positions_per_industry=args.max_positions_per_industry,
+        max_drawdown_pct=args.max_drawdown_pct,
+        nikkei_crash_pct=args.nikkei_crash_pct,
+        beta_weighted_halt_pct=args.beta_weighted_halt_pct,
     )
     print_summary(result)
     save_outputs(result, result["tickers"], args.years)
