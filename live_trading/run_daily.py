@@ -155,11 +155,14 @@ def check_halt(account_value: float, nikkei_return: float, portfolio_beta: float
     return False, None
 
 
-def run(today: str | None = None, production: bool = False) -> None:
+def run(today: str | None = None, production: bool = False, base_url: str | None = None) -> None:
+    """base_urlはテスト用(tests/mock_kabu_server.py)にAPIサーバーの向き先を差し替えるためのもの。
+    通常は指定しない。
+    """
     today = today or dt.date.today().isoformat()
     print(f"=== live_trading 実行開始 (date={today}, 環境={'本番' if production else '検証用'}) ===")
 
-    client = KabuStationClient(production=production)
+    client = KabuStationClient(production=production, base_url=base_url)
     client.authenticate()
 
     reconcile_entry_fills(client, today)

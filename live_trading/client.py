@@ -111,9 +111,12 @@ class KabuStationClient:
         balance = client.get_cash_balance()
     """
 
-    def __init__(self, production: bool = False):
+    def __init__(self, production: bool = False, base_url: str | None = None):
+        """base_urlはテスト用(mock_server.py)にAPIサーバーの向き先を差し替えるためのもの。
+        通常は指定しない(production引数でlocalhostの本番/検証用ポートを自動選択する)。
+        """
         port = PORT_PRODUCTION if production else PORT_VALIDATION
-        self.base_url = f"http://localhost:{port}/kabusapi"
+        self.base_url = base_url or f"http://localhost:{port}/kabusapi"
         self.production = production
         self._token: str | None = None
 
