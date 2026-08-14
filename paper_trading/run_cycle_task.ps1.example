@@ -1,0 +1,38 @@
+﻿# Wrapper script for Windows Task Scheduler to run one paper-trading cycle.
+# GitHub Actions runners (mostly US-hosted) get blocked by Binance's regional
+# restriction (HTTP 451), so this verification phase runs from the local PC instead (2026-08-14).
+#
+# Runs one cycle -> updates the dashboard snapshot -> commits & pushes to GitHub if changed.
+#
+# SETUP: copy this file to run_cycle_task.ps1 (gitignored, machine-specific) and fill in
+# your own paths below. This script must contain a real absolute path to run from Task
+# Scheduler, so it is intentionally excluded from the repo.
+
+$ErrorActionPreference = "Stop"
+$ProjectDir = "<path to>\daytrade-auto-execution"
+$VenvPython = "<path to>\.venv\Scripts\python.exe"
+$LogFile = Join-Path $ProjectDir "data\paper_trading_task.log"
+
+Set-Location $ProjectDir
+$env:PYTHONPATH = $ProjectDir
+$env:PYTHONIOENCODING = "utf-8"
+
+$timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+Add-Content -Path $LogFile -Value "`n=== $timestamp ===" -Encoding utf8
+
+try {
+    $output = & $VenvPython -m paper_trading.run_cycle 2>&1 | Out-String
+    Add-Content -Path $LogFile -Value $output -Encoding utf8
+
+    Copy-Item -Path "data\paper_trading.db" -Destination "data\paper_trading_cloud.db" -Force
+
+    $status = git status --short "data/paper_trading_cloud.db"
+    if ($status) {
+        git add "data/paper_trading_cloud.db"
+        git commit -m "chore: update paper trading history ($timestamp)" | Out-Null
+        git push | Out-Null
+        Add-Content -Path $LogFile -Value "committed and pushed" -Encoding utf8
+    }
+} catch {
+    Add-Content -Path $LogFile -Value "ERROR: $_" -Encoding utf8
+}
