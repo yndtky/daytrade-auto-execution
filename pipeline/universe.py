@@ -21,6 +21,10 @@ FULL_CACHE_PATH = DATA_DIR / "full_universe_cache.csv"
 STANDARD_CACHE_PATH = DATA_DIR / "standard_universe_cache.csv"
 CACHE_MAX_AGE_DAYS = 30
 
+SUPERVISION_URL = "https://www.jpx.co.jp/listing/market-alerts/supervision/index.html"
+SUPERVISION_CACHE_PATH = DATA_DIR / "supervised_tickers_cache.csv"
+SUPERVISION_CACHE_MAX_AGE_DAYS = 1  # 監理・整理銘柄は日々更新されるため短めのキャッシュ
+
 # JPXの33業種コードのうち、食料品(3050)からその他製品(3800)までが製造業の区分
 # (JPXの33業種コードは分類のまとまりごとに連番が振られており、この範囲がまとまって製造業にあたる)
 MANUFACTURING_INDUSTRY_CODES = {
@@ -61,11 +65,11 @@ def _extract_by_keywords(df: pd.DataFrame, keywords: list[str]) -> pd.DataFrame:
     return _extract_by_market(df, is_target)
 
 
-def _cache_is_fresh(path: Path) -> bool:
+def _cache_is_fresh(path: Path, max_age_days: int = CACHE_MAX_AGE_DAYS) -> bool:
     if not path.exists():
         return False
     age = dt.datetime.now() - dt.datetime.fromtimestamp(path.stat().st_mtime)
-    return age.days < CACHE_MAX_AGE_DAYS
+    return age.days < max_age_days
 
 
 def _get_universe_cached(cache_path: Path, keywords: list[str], force_refresh: bool) -> pd.DataFrame:
@@ -97,6 +101,44 @@ def get_full_tse_universe(force_refresh: bool = False) -> pd.DataFrame:
     バックテストで銘柄範囲を広げて検証するために用意した。
     """
     return _get_universe_cached(FULL_CACHE_PATH, ["プライム", "スタンダード", "グロース"], force_refresh)
+
+
+def get_supervised_tickers(force_refresh: bool = False) -> set[str]:
+    """現在「監理銘柄」「整理銘柄」に指定されている銘柄コードの集合を返す(JPX公式ページから)。
+
+    過去データが極めて限られる無料データ(yfinance)では、上場廃止銘柄を遡ってバックテストに
+    組み込む生存者バイアス対策はできなかった(2026-08-14、無料データソースの構造的な限界と判断)。
+    その代わりの前向きな対策として、「今まさに上場廃止リスクが高い銘柄」への新規エントリーを
+    避けるためにこの一覧を使う(live_trading/run_daily.py)。整理銘柄は上場廃止が正式決定済み、
+    監理銘柄(確認中/審査中)はその可能性が調査されている段階——どちらも新規に手を出すべき
+    状況ではないため、区別せず一括で「避けるべき銘柄」として扱う。
+
+    キャッシュは1日のみ有効(この一覧は日々更新されるため、業種一覧などの30日キャッシュとは
+    別扱い)。取得に失敗した場合は空集合を返す(この機能が使えないだけで、既存のエントリー
+    判定自体は止めない設計)。
+    """
+    if not force_refresh and _cache_is_fresh(SUPERVISION_CACHE_PATH, SUPERVISION_CACHE_MAX_AGE_DAYS):
+        cached = pd.read_csv(SUPERVISION_CACHE_PATH, dtype={"ticker": str})
+        return set(cached["ticker"])
+
+    try:
+        resp = requests.get(SUPERVISION_URL, headers={"User-Agent": UA}, timeout=15)
+        resp.raise_for_status()
+        resp.encoding = "utf-8"
+        tables = pd.read_html(io.StringIO(resp.text))
+    except Exception:  # noqa: BLE001
+        # 取得失敗時は空集合(=このチェックをスキップ)にして、日次実行全体は止めない
+        return set()
+
+    tickers: set[str] = set()
+    for table in tables:
+        if "コード" not in table.columns:
+            continue
+        tickers.update(table["コード"].astype(str))
+
+    SUPERVISION_CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    pd.DataFrame({"ticker": sorted(tickers)}).to_csv(SUPERVISION_CACHE_PATH, index=False)
+    return tickers
 
 
 def get_industry_map() -> dict[str, str]:

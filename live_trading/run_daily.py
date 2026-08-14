@@ -9,6 +9,10 @@ backtest/strategy.py(ShortlistStrategy)で検証済みのロジックを、backt
   - ポートフォリオ全体のサーキットブレーカー: 口座ドローダウン・日経急落・β加重インパクト
     (2026-08-14のバックテスト検証で「保険として有効、ただし過度に厳しいと逆効果」と確認済みの
     しきい値をデフォルトにしている)
+  - 監理・整理銘柄の除外: JPX公式ページ(pipeline.universe.get_supervised_tickers())から
+    現在の監理・整理銘柄一覧を取得し、新規エントリー対象から除外する。無料データ(yfinance)では
+    上場廃止銘柄を遡ってバックテストに組み込む生存者バイアス対策ができなかった(2026-08-14、
+    データソースの構造的な限界)代わりの、前向きなリスク回避策
 
 【決済(損切り・利確)の管理について】
 kabuステーションAPIはOCO注文(利確・損切りのセット注文)に未対応(公式Issue #1119、
@@ -43,7 +47,7 @@ from . import storage
 from .client import ORDER_STATE_FINISHED, KabuStationClient, KabuStationError
 from pipeline import risk_management as rm
 from pipeline.fetch_prices import fetch_nikkei225_index
-from pipeline.universe import get_industry_map
+from pipeline.universe import get_industry_map, get_supervised_tickers
 from storage.local_cache import read_daily_metrics
 
 # 2026-08-14のバックテスト検証(walkforward.py --rolling_folds 3)で確認済みの設定。
@@ -214,9 +218,17 @@ def run(today: str | None = None, production: bool = False, base_url: str | None
     shortlist = daily_metrics[daily_metrics["is_shortlisted"] == 1]
     print(f"本日の注目銘柄: {len(shortlist)}銘柄")
 
+    supervised_tickers = get_supervised_tickers()
+    if supervised_tickers:
+        print(f"監理・整理銘柄(新規エントリー対象外): {len(supervised_tickers)}銘柄")
+
     for _, row in shortlist.iterrows():
         ticker = str(row["ticker"])
         if ticker in held_tickers:
+            continue
+
+        if ticker in supervised_tickers:
+            print(f"見送り: {ticker}(監理・整理銘柄に指定されているため)")
             continue
 
         industry = industry_map.get(ticker)

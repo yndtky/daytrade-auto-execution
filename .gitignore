@@ -3,6 +3,7 @@ data/credentials.json
 data/universe_cache.csv
 data/full_universe_cache.csv
 data/standard_universe_cache.csv
+data/supervised_tickers_cache.csv
 data/nikkei225_cache.csv
 data/windows_ca_bundle.pem
 data/_*.txt
