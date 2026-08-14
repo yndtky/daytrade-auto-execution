@@ -7,6 +7,7 @@ paper_trading/storage.py・storage/local_cache.pyと同じ設計パターン(ロ
 基準(ピーク)を見失う。
 """
 
+import datetime as dt
 import sqlite3
 from pathlib import Path
 
@@ -53,11 +54,29 @@ CREATE TABLE IF NOT EXISTS open_positions (
 );
 """
 
+# 2026-08-14追加: date(日付のみ)に加えて、実際の発注時刻(created_at)を記録する。
+# バックテストと実運用の時間軸のズレ(シグナル確定時刻と発注時刻の差)を後から検証できるように
+# するため(外部資料の指摘を受けて追加)。CREATE TABLEだけでは既存DBに新しい列は増えないため、
+# ALTER TABLEで移行する(列が既にあればsqlite3.OperationalErrorを無視するだけでよい)。
+_MIGRATIONS = (
+    "ALTER TABLE live_orders ADD COLUMN created_at TEXT",
+    "ALTER TABLE open_positions ADD COLUMN created_at TEXT",
+)
+
+
+def _migrate(conn: sqlite3.Connection) -> None:
+    for stmt in _MIGRATIONS:
+        try:
+            conn.execute(stmt)
+        except sqlite3.OperationalError:
+            pass  # 列が既に存在する場合はこれでよい
+
 
 def _connect() -> sqlite3.Connection:
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(DB_PATH)
     conn.executescript(SCHEMA)
+    _migrate(conn)
     return conn
 
 
@@ -65,6 +84,7 @@ def _read_connect() -> sqlite3.Connection:
     path = DB_PATH if DB_PATH.exists() else CLOUD_SNAPSHOT_PATH
     conn = sqlite3.connect(path)
     conn.executescript(SCHEMA)
+    _migrate(conn)
     return conn
 
 
@@ -89,9 +109,9 @@ def log_daily_run(
 def log_order(date: str, ticker: str, side: str, quantity: int, price: float, order_id: str | None, status: str, note: str = "") -> None:
     with _connect() as conn:
         conn.execute(
-            "INSERT INTO live_orders (date, ticker, side, quantity, price, order_id, status, note) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            (date, ticker, side, quantity, price, order_id, status, note),
+            "INSERT INTO live_orders (date, ticker, side, quantity, price, order_id, status, note, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (date, ticker, side, quantity, price, order_id, status, note, dt.datetime.now().isoformat(timespec="seconds")),
         )
 
 
@@ -100,8 +120,9 @@ def open_position(ticker: str, opened_date: str, entry_order_id: str, entry_qty:
     with _connect() as conn:
         cur = conn.execute(
             "INSERT INTO open_positions (ticker, opened_date, status, entry_order_id, entry_qty, entry_price, "
-            "stop_price, target_price) VALUES (?, ?, 'entry_pending', ?, ?, ?, ?, ?)",
-            (ticker, opened_date, entry_order_id, entry_qty, entry_price, stop_price, target_price),
+            "stop_price, target_price, created_at) VALUES (?, ?, 'entry_pending', ?, ?, ?, ?, ?, ?)",
+            (ticker, opened_date, entry_order_id, entry_qty, entry_price, stop_price, target_price,
+             dt.datetime.now().isoformat(timespec="seconds")),
         )
         return cur.lastrowid
 
