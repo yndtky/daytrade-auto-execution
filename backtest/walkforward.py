@@ -51,7 +51,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--capital", type=float, default=1_000_000)
     parser.add_argument("--commission_pct", type=float, default=0.0)
     parser.add_argument("--slippage_pct", type=float, default=0.001)
+    parser.add_argument("--risk_pct", type=float, default=None, help="1トレードのリスク%%(未指定ならrisk_managementの既定値)")
+    parser.add_argument("--lot_size", type=int, default=None, help="売買単位(株)。単元未満株を想定する場合は1を指定")
+    parser.add_argument("--min_signals", type=int, default=None, help="エントリーに必要なシグナル数(未指定なら本番と同じ2)")
+    parser.add_argument(
+        "--max_positions_per_industry", type=int, default=None,
+        help="同じ業種を同時に保有できる上限ポジション数。未指定なら制限しない",
+    )
     parser.add_argument("--sweep", action="store_true", help="ATR倍率・リスクリワード比の感度分析を行う")
+    parser.add_argument(
+        "--rolling_folds", type=int, default=None,
+        help="全期間をこの数の独立した期間に区切り、期間ごとの成績のばらつき(相場局面依存度)を見る。指定時はin-sample/out-of-sample分割の代わりにこちらを実行",
+    )
     return parser.parse_args()
 
 
@@ -73,11 +84,18 @@ def print_row(label: str, s: dict) -> None:
     print(f"{label:<18} トレード数:{trades:>4}  勝率:{win:>7}  リターン:{ret:>8}  年率:{cagr:>7}  最大DD:{dd:>7}  SQN:{sqn:>6}")
 
 
-def run_split_check(signals_by_ticker: dict, cutoff: pd.Timestamp, capital: float, commission_pct: float, slippage_pct: float) -> None:
+def run_split_check(
+    signals_by_ticker: dict,
+    cutoff: pd.Timestamp,
+    capital: float,
+    commission_pct: float,
+    slippage_pct: float,
+    strategy_kwargs: dict | None = None,
+) -> None:
     in_sample, out_of_sample = split_signals(signals_by_ticker, cutoff)
 
-    is_result = run_backtest_on_signals(in_sample, capital, commission_pct, slippage_pct)
-    oos_result = run_backtest_on_signals(out_of_sample, capital, commission_pct, slippage_pct)
+    is_result = run_backtest_on_signals(in_sample, capital, commission_pct, slippage_pct, strategy_kwargs)
+    oos_result = run_backtest_on_signals(out_of_sample, capital, commission_pct, slippage_pct, strategy_kwargs)
 
     is_summary = summarize(is_result)
     oos_summary = summarize(oos_result)
@@ -121,7 +139,12 @@ def _print_pooled_row(label: str, s: dict) -> None:
 
 
 def run_pooled_split_check(
-    signals_by_ticker: dict, cutoff: pd.Timestamp, capital: float, commission_pct: float, slippage_pct: float
+    signals_by_ticker: dict,
+    cutoff: pd.Timestamp,
+    capital: float,
+    commission_pct: float,
+    slippage_pct: float,
+    strategy_kwargs: dict | None = None,
 ) -> None:
     """銘柄ごとに独立した口座でプールする方式(signal_quality.pyと同じ)でのin-sample/out-of-sample比較。
 
@@ -132,8 +155,8 @@ def run_pooled_split_check(
     in_sample, out_of_sample = split_signals(signals_by_ticker, cutoff)
 
     print(f"\n=== [プール方式] in-sample vs out-of-sample (分割日: {cutoff.date()}) ===")
-    is_trades = run_pooled(in_sample, capital, commission_pct, slippage_pct)
-    oos_trades = run_pooled(out_of_sample, capital, commission_pct, slippage_pct)
+    is_trades = run_pooled(in_sample, capital, commission_pct, slippage_pct, strategy_kwargs)
+    oos_trades = run_pooled(out_of_sample, capital, commission_pct, slippage_pct, strategy_kwargs)
 
     is_stats = _pooled_stats(is_trades)
     oos_stats = _pooled_stats(oos_trades)
@@ -194,6 +217,77 @@ def run_sweep(signals_by_ticker: dict, cutoff: pd.Timestamp, capital: float, com
         print("\n✓ in-sampleで良かった組み合わせは、out-of-sampleでも(少なくともデフォルトを下回らない程度に)機能している。")
 
 
+def run_rolling_folds(
+    signals_by_ticker: dict,
+    n_folds: int,
+    capital: float,
+    commission_pct: float,
+    slippage_pct: float,
+    strategy_kwargs: dict | None = None,
+    shared_kwargs: dict | None = None,
+) -> None:
+    """全期間をn_folds個の独立した(重複しない)期間に区切り、期間ごとの成績を並べる。
+
+    1回のin-sample/out-of-sample分割だと、たまたま「未知期間」に選んだ1つの相場局面
+    (例: 2023〜2026年の強い上げ相場)が良かった/悪かっただけなのか、相場局面によらず
+    エッジが安定しているのかを区別できない(2026-08-14、oos_years=1→3で実際にこの問題に
+    遭遇し、in-sample SQN 0.19 → out-of-sample SQN 2.57という大きなばらつきが出た)。
+    複数の独立した期間を並べて見ることで、「毎回だいたい同じくらいの成績」なのか
+    「期間によって全く違う」のかを区別する。
+    """
+    all_dates = pd.concat([df.index.to_series() for df in signals_by_ticker.values() if len(df)])
+    overall_start, overall_end = all_dates.min(), all_dates.max()
+    total_days = (overall_end - overall_start).days
+    fold_days = total_days // n_folds
+
+    boundaries = [overall_start + pd.Timedelta(days=fold_days * i) for i in range(n_folds + 1)]
+    boundaries[-1] = overall_end + pd.Timedelta(days=1)  # 最後の境界だけ確実に全データを含むよう補正
+
+    print(f"\n=== ローリング検証(全期間を独立した{n_folds}期間に分割) ===")
+
+    pooled_rows, shared_rows = [], []
+    for i in range(n_folds):
+        fold_start, fold_end = boundaries[i], boundaries[i + 1]
+        fold_signals = {
+            t: df[(df.index >= fold_start) & (df.index < fold_end)] for t, df in signals_by_ticker.items()
+        }
+        label = f"期間{i+1}({fold_start.date()}〜{(fold_end - pd.Timedelta(days=1)).date()})"
+
+        pooled_trades = run_pooled(fold_signals, capital, commission_pct, slippage_pct, strategy_kwargs)
+        pooled_stats = _pooled_stats(pooled_trades)
+        pooled_stats["label"] = label
+        pooled_rows.append(pooled_stats)
+
+        shared_result = run_backtest_on_signals(fold_signals, capital, commission_pct, slippage_pct, shared_kwargs)
+        shared_stats = summarize(shared_result)
+        shared_stats["label"] = label
+        shared_rows.append(shared_stats)
+
+    print("\n--- プール方式(銘柄ごとに独立した口座) ---")
+    for r in pooled_rows:
+        _print_pooled_row(r["label"], r)
+
+    print("\n--- 共有口座方式(1つの口座を想定) ---")
+    for r in shared_rows:
+        print_row(r["label"], r)
+
+    print()
+    pooled_exps = [r["expectancy_pct"] for r in pooled_rows if r["expectancy_pct"] is not None]
+    shared_sqns = [r["sqn"] for r in shared_rows if r["sqn"] is not None]
+    if pooled_exps:
+        print(f"プール方式の期待値/トレード: 期間ごとに {[f'{e:+.2f}%' for e in pooled_exps]}")
+        if all(e > 0 for e in pooled_exps):
+            print("✓ 全期間でプラス。相場局面によらず比較的安定している。")
+        elif any(e <= 0 for e in pooled_exps):
+            print("⚠ マイナスの期間がある。相場局面への依存度が高い可能性がある。")
+    if shared_sqns:
+        print(f"共有口座方式のSQN: 期間ごとに {[f'{s:.2f}' for s in shared_sqns]}")
+        if max(shared_sqns) - min(shared_sqns) > 2.0:
+            print("⚠ 期間によるSQNのばらつきが大きい(2.0超)。共有口座方式はトレード数が少なく、")
+            print("  1回の実現順序に結果が左右されやすいため、この振れ幅そのものは想定の範囲内。")
+    print("※ いずれも過去データ上のシミュレーションであり、将来の利益を保証するものではない。")
+
+
 def main() -> None:
     args = parse_args()
     tickers = resolve_tickers(args.tickers, args.max_tickers)
@@ -205,21 +299,43 @@ def main() -> None:
 
     t0 = time.time()
     signals_by_ticker = {
-        ticker: compute_all_signals(raw) for ticker, raw in prices.items() if not raw.empty and len(raw) >= 60
+        ticker: compute_all_signals(raw, args.min_signals)
+        for ticker, raw in prices.items()
+        if not raw.empty and len(raw) >= 60
     }
     print(f"指標計算完了: {len(signals_by_ticker)}銘柄 ({time.time() - t0:.0f}秒)")
 
     if not signals_by_ticker:
         raise SystemExit("有効なデータが1銘柄も取得できませんでした")
 
-    latest_dates = [df.index.max() for df in signals_by_ticker.values() if len(df)]
-    cutoff = max(latest_dates) - pd.Timedelta(days=int(args.oos_years * 365))
+    strategy_kwargs = {}
+    if args.risk_pct is not None:
+        strategy_kwargs["risk_pct"] = args.risk_pct
+    if args.lot_size is not None:
+        strategy_kwargs["lot_size"] = args.lot_size
+
+    # 業種分散は「複数銘柄を同時に保有する」という概念があって初めて意味を持つため、
+    # 銘柄ごとに独立した口座で回すプール方式(run_pooled_split_check)には渡さない。
+    shared_kwargs = dict(strategy_kwargs)
+    if args.max_positions_per_industry is not None:
+        from pipeline.universe import get_industry_map
+
+        shared_kwargs["industry_by_ticker"] = get_industry_map()
+        shared_kwargs["max_positions_per_industry"] = args.max_positions_per_industry
 
     t0 = time.time()
-    run_pooled_split_check(signals_by_ticker, cutoff, args.capital, args.commission_pct, args.slippage_pct)
-    run_split_check(signals_by_ticker, cutoff, args.capital, args.commission_pct, args.slippage_pct)
-    if args.sweep:
-        run_sweep(signals_by_ticker, cutoff, args.capital, args.commission_pct, args.slippage_pct)
+    if args.rolling_folds:
+        run_rolling_folds(
+            signals_by_ticker, args.rolling_folds, args.capital, args.commission_pct, args.slippage_pct,
+            strategy_kwargs, shared_kwargs,
+        )
+    else:
+        latest_dates = [df.index.max() for df in signals_by_ticker.values() if len(df)]
+        cutoff = max(latest_dates) - pd.Timedelta(days=int(args.oos_years * 365))
+        run_pooled_split_check(signals_by_ticker, cutoff, args.capital, args.commission_pct, args.slippage_pct, strategy_kwargs)
+        run_split_check(signals_by_ticker, cutoff, args.capital, args.commission_pct, args.slippage_pct, shared_kwargs)
+        if args.sweep:
+            run_sweep(signals_by_ticker, cutoff, args.capital, args.commission_pct, args.slippage_pct)
     print(f"\n(検証処理時間: {time.time() - t0:.0f}秒)")
 
 

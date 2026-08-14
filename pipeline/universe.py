@@ -15,7 +15,10 @@ JPX_LIST_URL = (
 )
 UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36"
 
-CACHE_PATH = Path(__file__).resolve().parent.parent / "data" / "universe_cache.csv"
+DATA_DIR = Path(__file__).resolve().parent.parent / "data"
+CACHE_PATH = DATA_DIR / "universe_cache.csv"
+FULL_CACHE_PATH = DATA_DIR / "full_universe_cache.csv"
+STANDARD_CACHE_PATH = DATA_DIR / "standard_universe_cache.csv"
 CACHE_MAX_AGE_DAYS = 30
 
 # JPXの33業種コードのうち、食料品(3050)からその他製品(3800)までが製造業の区分
@@ -32,46 +35,87 @@ def _download_jpx_list() -> pd.DataFrame:
     return pd.read_excel(io.BytesIO(resp.content))
 
 
-def _extract_prime(df: pd.DataFrame) -> pd.DataFrame:
-    is_prime = df["市場・商品区分"].astype(str).str.contains("プライム")
-    prime = df.loc[
-        is_prime, ["コード", "銘柄名", "市場・商品区分", "33業種区分", "33業種コード"]
+def _extract_by_market(df: pd.DataFrame, is_target_market: pd.Series) -> pd.DataFrame:
+    result = df.loc[
+        is_target_market, ["コード", "銘柄名", "市場・商品区分", "33業種区分", "33業種コード"]
     ].copy()
-    prime.columns = ["ticker", "name", "market_segment", "industry", "industry_code"]
-    prime["ticker"] = prime["ticker"].astype(str)
-    prime["industry_code"] = prime["industry_code"].astype(str)
-    prime["is_manufacturing"] = prime["industry_code"].isin(MANUFACTURING_INDUSTRY_CODES)
+    result.columns = ["ticker", "name", "market_segment", "industry", "industry_code"]
+    result["ticker"] = result["ticker"].astype(str)
+    result["industry_code"] = result["industry_code"].astype(str)
+    result["is_manufacturing"] = result["industry_code"].isin(MANUFACTURING_INDUSTRY_CODES)
 
     # 通常の証券コードは4文字(数字4桁、または2024年以降の英数字混在4桁)。
     # 優先株式・社債型種類株式などは「25935」のように5桁の別コード体系で、普通株とは
     # 値動きの性質が全く異なる上、単純に".T"を付けてyfinanceに問い合わせても正しい銘柄に
     # 解決するとは限らない(実際、バックテストで銘柄名不明の異常なリターンを出す原因になった)。
-    # 対象を普通株のプライム市場銘柄に絞るため、4文字以外のコードは除外する。
-    prime = prime[prime["ticker"].str.len() == 4]
+    # 対象を普通株に絞るため、4文字以外のコードは除外する。
+    result = result[result["ticker"].str.len() == 4]
 
-    return prime.reset_index(drop=True)
+    return result.reset_index(drop=True)
 
 
-def _cache_is_fresh() -> bool:
-    if not CACHE_PATH.exists():
+def _extract_by_keywords(df: pd.DataFrame, keywords: list[str]) -> pd.DataFrame:
+    """市場・商品区分がkeywordsのいずれかを含む行を抽出する(内国株式の普通株のみ)。"""
+    segment = df["市場・商品区分"].astype(str)
+    is_target = segment.str.contains("|".join(keywords))
+    return _extract_by_market(df, is_target)
+
+
+def _cache_is_fresh(path: Path) -> bool:
+    if not path.exists():
         return False
-    age = dt.datetime.now() - dt.datetime.fromtimestamp(CACHE_PATH.stat().st_mtime)
+    age = dt.datetime.now() - dt.datetime.fromtimestamp(path.stat().st_mtime)
     return age.days < CACHE_MAX_AGE_DAYS
+
+
+def _get_universe_cached(cache_path: Path, keywords: list[str], force_refresh: bool) -> pd.DataFrame:
+    if not force_refresh and _cache_is_fresh(cache_path):
+        return pd.read_csv(cache_path, dtype={"ticker": str})
+
+    df = _download_jpx_list()
+    universe = _extract_by_keywords(df, keywords)
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    universe.to_csv(cache_path, index=False)
+    return universe
 
 
 def get_prime_universe(force_refresh: bool = False) -> pd.DataFrame:
     """プライム市場銘柄一覧を返す。キャッシュが30日以内なら再取得しない。"""
-    if not force_refresh and _cache_is_fresh():
-        return pd.read_csv(CACHE_PATH, dtype={"ticker": str})
+    return _get_universe_cached(CACHE_PATH, ["プライム"], force_refresh)
 
-    df = _download_jpx_list()
-    prime = _extract_prime(df)
-    CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
-    prime.to_csv(CACHE_PATH, index=False)
-    return prime
+
+def get_standard_universe(force_refresh: bool = False) -> pd.DataFrame:
+    """スタンダード市場銘柄一覧を返す(バックテスト検証用)。"""
+    return _get_universe_cached(STANDARD_CACHE_PATH, ["スタンダード"], force_refresh)
+
+
+def get_full_tse_universe(force_refresh: bool = False) -> pd.DataFrame:
+    """プライム・スタンダード・グロースを合わせた銘柄一覧を返す(バックテスト検証用)。
+
+    小口座(数万円〜十数万円)ではプライム市場の値がさ株ばかりでは選択肢が
+    限られるため、日次パイプライン本番用の get_prime_universe() とは別に、
+    バックテストで銘柄範囲を広げて検証するために用意した。
+    """
+    return _get_universe_cached(FULL_CACHE_PATH, ["プライム", "スタンダード", "グロース"], force_refresh)
+
+
+def get_industry_map() -> dict[str, str]:
+    """銘柄コード→33業種名のマッピングを返す(プライム+スタンダード+グロース全体)。
+
+    バックテストの業種分散ロジック(同じ業種を同時に何ポジションまで持つか)向け。
+    """
+    universe = get_full_tse_universe()
+    return dict(zip(universe["ticker"], universe["industry"]))
 
 
 if __name__ == "__main__":
     universe = get_prime_universe(force_refresh=True)
     print(f"プライム市場銘柄数: {len(universe)}")
     print(universe.head())
+
+    standard_universe = get_standard_universe(force_refresh=True)
+    print(f"スタンダード市場銘柄数: {len(standard_universe)}")
+
+    full_universe = get_full_tse_universe(force_refresh=True)
+    print(f"プライム+スタンダード+グロース銘柄数: {len(full_universe)}")
+    print(full_universe["market_segment"].value_counts())

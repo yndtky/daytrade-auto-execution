@@ -62,11 +62,17 @@ def _drop_outlier_trades(trades: pd.DataFrame) -> pd.DataFrame:
     return trades.loc[~is_outlier].reset_index(drop=True)
 
 
-def run_pooled(signals_by_ticker: dict, capital: float, commission_pct: float, slippage_pct: float) -> pd.DataFrame:
+def run_pooled(
+    signals_by_ticker: dict,
+    capital: float,
+    commission_pct: float,
+    slippage_pct: float,
+    strategy_kwargs: dict | None = None,
+) -> pd.DataFrame:
     """銘柄ごとに個別のCerebroでバックテストし、全トレードを1つのDataFrameにまとめる。"""
     all_trades = []
     for i, (ticker, signals) in enumerate(signals_by_ticker.items(), start=1):
-        result = run_backtest_on_signals({ticker: signals}, capital, commission_pct, slippage_pct)
+        result = run_backtest_on_signals({ticker: signals}, capital, commission_pct, slippage_pct, strategy_kwargs)
         if result is not None:
             all_trades.extend(result["strategy"].trade_log)
         if i % 200 == 0:

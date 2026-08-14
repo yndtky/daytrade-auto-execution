@@ -1,0 +1,41 @@
+name: ペーパートレード(Binance Testnet)
+
+# 15分おきに実行。無料枠のみ・実際のお金は一切動かないテストネット環境。
+# GitHub Actionsのスケジュール実行は指定時刻ちょうどではなく、数分遅れることがあります。
+on:
+  schedule:
+    - cron: "*/15 * * * *"
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: 依存関係インストール
+        run: pip install -r requirements.txt
+
+      - name: ペーパートレード1サイクル実行
+        env:
+          BINANCE_TESTNET_API_KEY: ${{ secrets.BINANCE_TESTNET_API_KEY }}
+          BINANCE_TESTNET_API_SECRET: ${{ secrets.BINANCE_TESTNET_API_SECRET }}
+        run: python -m paper_trading.run_cycle
+
+      - name: クラウド公開用スナップショットを更新
+        run: cp data/paper_trading.db data/paper_trading_cloud.db
+
+      - name: スナップショットをコミット&プッシュ(ダッシュボード用)
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add data/paper_trading_cloud.db
+          git diff --cached --quiet && echo "変更なし" || git commit -m "chore: ペーパートレード履歴更新 ($(date -u +%Y-%m-%dT%H:%M:%SZ))"
+          git push

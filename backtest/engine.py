@@ -7,9 +7,17 @@ run_backtest.py(通常の1回きりバックテスト)とwalkforward.py(in-sampl
 """
 
 import backtrader as bt
+import pandas as pd
 
 from .data import SignalPandasData
 from .strategy import ShortlistStrategy
+
+# backtraderは複数データフィードを1つのCerebroに混ぜると、一番開始日が遅い(=データ期間が
+# 短い)フィードに全体の実行期間を合わせてしまう(next()がそのフィードの開始日以降しか
+# 呼ばれない)。新規上場銘柄が1つ混ざるだけで「5年分のつもりが実質数ヶ月」になり得るため
+# (2026-08-14に実際にこれで結果が壊れたことがある)、最も早く始まる銘柄の開始日から
+# この日数以上遅れて始まる銘柄は、共有口座シミュレーションの対象から外す。
+MAX_START_DATE_LAG_DAYS = 30
 
 
 def run_backtest_on_signals(
@@ -19,15 +27,28 @@ def run_backtest_on_signals(
     slippage_pct: float = 0.001,
     strategy_kwargs: dict | None = None,
 ) -> dict | None:
-    """{ticker: シグナルDataFrame} を受け取ってバックテストを実行する。
+    """{ticker: シグナルDataFrame} を受け取ってバックテストを実行する(複数銘柄は1つの共有口座)。
 
     有効な銘柄が1つもない(全銘柄が最小データ長に満たない)場合はNoneを返す。
     """
-    cerebro = bt.Cerebro()
+    candidates = {t: s for t, s in signals_by_ticker.items() if s is not None and len(s) >= 60}
+    if not candidates:
+        return None
 
+    earliest_start = min(s.index.min() for s in candidates.values())
+    cutoff = earliest_start + pd.Timedelta(days=MAX_START_DATE_LAG_DAYS)
+    skipped = [t for t, s in candidates.items() if s.index.min() > cutoff]
+    if skipped:
+        print(
+            f"⚠ 開始日が{earliest_start.date()}から{MAX_START_DATE_LAG_DAYS}日以上遅い{len(skipped)}銘柄を"
+            f"共有口座シミュレーションから除外(混在させると全体の実行期間がそこに引きずられるため): "
+            f"{', '.join(skipped[:10])}{' ...' if len(skipped) > 10 else ''}"
+        )
+
+    cerebro = bt.Cerebro()
     loaded = []
-    for ticker, signals in signals_by_ticker.items():
-        if signals is None or len(signals) < 60:
+    for ticker, signals in candidates.items():
+        if ticker in skipped:
             continue
         feed = SignalPandasData(dataname=signals)
         cerebro.adddata(feed, name=ticker)
@@ -57,6 +78,7 @@ def run_backtest_on_signals(
         "tickers": loaded,
         "start_value": start_value,
         "end_value": end_value,
+        "injections": strat.injection_log,
         "strategy": strat,
         "trades_analysis": strat.analyzers.trades.get_analysis(),
         "drawdown": strat.analyzers.dd.get_analysis(),

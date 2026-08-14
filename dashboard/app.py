@@ -583,3 +583,46 @@ else:
         )
     else:
         st.caption("この実行ではトレードが発生しませんでした。")
+
+st.header("ペーパートレード(Binance Testnet)")
+st.caption(
+    "ロードマップのステップ3(発注・エラー処理・再接続まわりの仕組みの検証)。"
+    "実際のお金は一切動いていません(Binance公式のテスト専用環境)。JP株のシグナルロジックとは無関係の、"
+    "仕組み検証専用のシンプルな移動平均クロス戦略を使っています。GitHub Actionsが15分おきに自動実行します。"
+)
+
+try:
+    from paper_trading import storage as paper_storage
+
+    cycles = paper_storage.read_cycles(limit=200)
+    orders = paper_storage.read_orders(limit=200)
+except Exception as e:  # noqa: BLE001
+    cycles, orders = None, None
+    st.caption(f"ペーパートレードのデータをまだ読み込めません(未実行、または読み込みエラー: {e})。")
+
+if cycles is not None:
+    if cycles.empty:
+        st.caption("まだ実行履歴がありません。GitHub Actionsの初回実行を待つか、手動実行してください。")
+    else:
+        pc1, pc2, pc3, pc4 = st.columns(4)
+        pc1.metric("実行サイクル数", len(cycles))
+        pc2.metric("発注件数", len(orders) if orders is not None else 0)
+        error_count = cycles["error"].notna().sum()
+        pc3.metric("エラー件数", int(error_count))
+        latest = cycles.iloc[0]
+        pc4.metric("直近ポジション", latest.get("position_state") or "-")
+
+        st.caption("実行履歴(新しい順)")
+        st.dataframe(
+            cycles[["timestamp", "symbol", "action", "price", "ma_short", "ma_long", "position_state", "note", "error"]],
+            use_container_width=True,
+            hide_index=True,
+        )
+
+        if orders is not None and not orders.empty:
+            st.caption("発注履歴(新しい順)")
+            st.dataframe(
+                orders[["timestamp", "symbol", "side", "quantity", "order_id", "status"]],
+                use_container_width=True,
+                hide_index=True,
+            )

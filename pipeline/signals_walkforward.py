@@ -104,14 +104,16 @@ def liquidity_ok_series(
     return turnover >= min_turnover
 
 
-def compute_all_signals(df: pd.DataFrame) -> pd.DataFrame:
+def compute_all_signals(df: pd.DataFrame, min_signals: int | None = None) -> pd.DataFrame:
     """OHLCV DataFrame(日付昇順、列: Open/High/Low/Close/Volume)から、全期間ぶんの指標・
     エントリーシグナルをDataFrameで返す(各行はその日までのデータのみで計算、未来参照なし)。
 
     entry_signalは screen.select_shortlist と同じ条件(流動性OK かつ ATTENTION_FLAGSの
-    うちMIN_SIGNALS個以上が成立)。本番の「本日の注目銘柄」判定と定義を一致させるため、
-    screen.pyの定数をそのまま使う。
+    うちmin_signals個以上が成立)。min_signals未指定時は本番の「本日の注目銘柄」判定と
+    同じ screen.MIN_SIGNALS(=2)を使うが、バックテストで条件の厳しさを変えて検証したい
+    場合はここで上書きできる(小口座では候補を絞って質を優先したい、等の検証用)。
     """
+    min_signals = screen.MIN_SIGNALS if min_signals is None else min_signals
     close, volume = df["Close"], df["Volume"]
 
     out = pd.DataFrame(index=df.index)
@@ -134,7 +136,7 @@ def compute_all_signals(df: pd.DataFrame) -> pd.DataFrame:
         out[flag_col] = out[flag_col].fillna(False)
 
     signal_count = out[screen.ATTENTION_FLAGS].astype(bool).sum(axis=1)
-    out["entry_signal"] = (out["liquidity_ok"] & (signal_count >= screen.MIN_SIGNALS)).astype(float)
+    out["entry_signal"] = (out["liquidity_ok"] & (signal_count >= min_signals)).astype(float)
     out["atr14"] = out["atr14"].ffill().fillna(0.0)
     out["buy_pressure_score"] = out["buy_pressure_score"].fillna(0.0)
 
