@@ -30,6 +30,7 @@ if hasattr(sys.stdout, "reconfigure"):
 
 from .data import fetch_history_bulk, fetch_nikkei_history
 from .engine import run_backtest_on_signals, summarize
+from .experiment_log import log_experiment
 from .run_backtest import nikkei_daily_returns, resolve_tickers
 from .signal_quality import run_pooled
 from pipeline import risk_management as rm
@@ -241,7 +242,10 @@ def run_rolling_folds(
     slippage_pct: float,
     strategy_kwargs: dict | None = None,
     shared_kwargs: dict | None = None,
-) -> None:
+) -> tuple[list[float], list[float]]:
+    """戻り値: (プール方式の期間ごとの期待値%リスト, 共有口座方式の期間ごとのSQNリスト)。
+    experiment_log.pyへの自動記録用(呼び出し側で使わなくてもよい)。
+    """
     """全期間をn_folds個の独立した(重複しない)期間に区切り、期間ごとの成績を並べる。
 
     1回のin-sample/out-of-sample分割だと、たまたま「未知期間」に選んだ1つの相場局面
@@ -303,6 +307,8 @@ def run_rolling_folds(
             print("  1回の実現順序に結果が左右されやすいため、この振れ幅そのものは想定の範囲内。")
     print("※ いずれも過去データ上のシミュレーションであり、将来の利益を保証するものではない。")
 
+    return pooled_exps, shared_sqns
+
 
 def main() -> None:
     args = parse_args()
@@ -355,11 +361,31 @@ def main() -> None:
         if args.beta_weighted_halt_pct is not None:
             shared_kwargs["beta_weighted_halt_pct"] = args.beta_weighted_halt_pct
 
+    # 試行履歴の記録用(IKEDAさんの「試行回数・選択プロセスを検証対象にする」という指摘を受けて
+    # 2026-08-14追加)。tickers引数の解決済み全銘柄リストは長すぎるので含めず、指定値のみ残す。
+    config_summary = (
+        f"tickers={args.tickers}(max={args.max_tickers}) years={args.years} capital={args.capital:.0f} "
+        f"risk_pct={args.risk_pct} lot_size={args.lot_size} min_signals={args.min_signals} "
+        f"trailing_stop={args.trailing_stop} max_positions_per_industry={args.max_positions_per_industry} "
+        f"correlation_window={args.correlation_window} max_avg_correlation={args.max_avg_correlation} "
+        f"target_portfolio_beta={args.target_portfolio_beta} max_drawdown_pct={args.max_drawdown_pct} "
+        f"nikkei_crash_pct={args.nikkei_crash_pct} beta_weighted_halt_pct={args.beta_weighted_halt_pct}"
+    )
+
     t0 = time.time()
     if args.rolling_folds:
-        run_rolling_folds(
+        pooled_exps, shared_sqns = run_rolling_folds(
             signals_by_ticker, args.rolling_folds, args.capital, args.commission_pct, args.slippage_pct,
             strategy_kwargs, shared_kwargs,
+        )
+        headline = f"pooled_expectancy_pct={[round(e, 2) for e in pooled_exps]} shared_sqn={[round(s, 2) for s in shared_sqns]}"
+        log_experiment(
+            script="walkforward.py --rolling_folds",
+            config_summary=config_summary + f" rolling_folds={args.rolling_folds}",
+            method="rolling_folds",
+            headline_metric=headline,
+            verdict="info",
+            notes="自動記録。採用/不採用の判断は別途人間が行う。",
         )
     else:
         latest_dates = [df.index.max() for df in signals_by_ticker.values() if len(df)]
@@ -368,6 +394,14 @@ def main() -> None:
         run_split_check(signals_by_ticker, cutoff, args.capital, args.commission_pct, args.slippage_pct, shared_kwargs)
         if args.sweep:
             run_sweep(signals_by_ticker, cutoff, args.capital, args.commission_pct, args.slippage_pct)
+        log_experiment(
+            script="walkforward.py",
+            config_summary=config_summary + f" oos_years={args.oos_years} sweep={args.sweep}",
+            method="split_check" + ("+sweep" if args.sweep else ""),
+            headline_metric="(詳細はコンソール出力・ログ参照。in-sample/out-of-sample分割検証)",
+            verdict="info",
+            notes="自動記録。採用/不採用の判断は別途人間が行う。",
+        )
     print(f"\n(検証処理時間: {time.time() - t0:.0f}秒)")
 
 
