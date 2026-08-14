@@ -60,6 +60,13 @@ class ShortlistStrategy(bt.Strategy):
         # 指摘を受けた、業種分散に続く2つ目の分散手法。業種分散と独立に併用できる。
         ("correlation_window", None),
         ("max_avg_correlation", None),
+        # β連動ポジションサイジング(2026-08-14追加、デフォルト無効): 相関ベース分散(入るか
+        # 入らないかの二択)が小口座では効きにくかったため、代わりに「量」を連続的に調整する
+        # 案。現在保有中銘柄の時価加重平均β(_portfolio_beta())がtarget_portfolio_betaを
+        # 超えている時だけ、新規ポジションのrisk_pctを比例的に縮小する
+        # (scale = target_portfolio_beta / current_portfolio_beta、上限1.0)。
+        # 保有が無い、またはまだ目標β以下の時は縮小しない(=risk_pctそのまま)。
+        ("target_portfolio_beta", None),
     )
 
     def __init__(self):
@@ -114,6 +121,17 @@ class ShortlistStrategy(bt.Strategy):
                 correlations.append(corr)
 
         return float(np.mean(correlations)) if correlations else None
+
+    def _risk_pct_scale(self) -> float:
+        """現在の保有β合計が目標を超えている分だけ、新規ポジションのrisk_pctを縮小する倍率。
+        target_portfolio_beta未指定、保有無し、または目標未満ならそのまま1.0(縮小なし)。
+        """
+        if self.p.target_portfolio_beta is None:
+            return 1.0
+        current_beta = self._portfolio_beta()
+        if current_beta <= self.p.target_portfolio_beta:
+            return 1.0
+        return self.p.target_portfolio_beta / current_beta
 
     def _check_halt_new_entries(self, today: str) -> bool:
         """新規エントリーを停止すべきか判定する(既存ポジションの決済には影響しない)。"""
@@ -180,7 +198,8 @@ class ShortlistStrategy(bt.Strategy):
             stop = rm.stop_loss_price(entry_price, atr, self.p.atr_multiplier)
             target = rm.take_profit_price(entry_price, stop, self.p.risk_reward_ratio)
             capital = self.broker.getvalue()
-            shares = rm.position_size_shares(capital, self.p.risk_pct, entry_price, stop, self.p.lot_size)
+            effective_risk_pct = self.p.risk_pct * self._risk_pct_scale()
+            shares = rm.position_size_shares(capital, effective_risk_pct, entry_price, stop, self.p.lot_size)
             if shares <= 0:
                 continue
 

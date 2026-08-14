@@ -96,6 +96,10 @@ def parse_args() -> argparse.Namespace:
         "--max_avg_correlation", type=float, default=None,
         help="新規候補と保有中銘柄群との平均相関がこれを超えたら見送る(0〜1、例: 0.7)。--correlation_windowとセットで指定",
     )
+    parser.add_argument(
+        "--target_portfolio_beta", type=float, default=None,
+        help="保有中銘柄の加重平均βがこれを超えたら、新規ポジションのサイズを比例的に縮小する(例: 1.0)",
+    )
     return parser.parse_args()
 
 
@@ -151,6 +155,7 @@ def run(
     trailing_stop: bool = False,
     correlation_window: int | None = None,
     max_avg_correlation: float | None = None,
+    target_portfolio_beta: float | None = None,
 ) -> dict:
     print(f"価格データ取得中: {len(tickers)}銘柄 x {years}年...")
     t0 = time.time()
@@ -189,6 +194,8 @@ def run(
     if correlation_window is not None and max_avg_correlation is not None:
         strategy_kwargs["correlation_window"] = correlation_window
         strategy_kwargs["max_avg_correlation"] = max_avg_correlation
+    if target_portfolio_beta is not None:
+        strategy_kwargs["target_portfolio_beta"] = target_portfolio_beta
 
     t0 = time.time()
     result = run_backtest_on_signals(signals_by_ticker, capital, commission_pct, slippage_pct, strategy_kwargs)
@@ -318,6 +325,7 @@ def main() -> None:
         trailing_stop=args.trailing_stop,
         correlation_window=args.correlation_window,
         max_avg_correlation=args.max_avg_correlation,
+        target_portfolio_beta=args.target_portfolio_beta,
     )
     print_summary(result)
     save_outputs(result, result["tickers"], args.years)

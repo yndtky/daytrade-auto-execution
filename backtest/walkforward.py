@@ -70,6 +70,10 @@ def parse_args() -> argparse.Namespace:
         "--max_avg_correlation", type=float, default=None,
         help="新規候補と保有中銘柄群との平均相関がこれを超えたら見送る(0〜1)",
     )
+    parser.add_argument(
+        "--target_portfolio_beta", type=float, default=None,
+        help="保有中銘柄の加重平均βがこれを超えたら、新規ポジションのサイズを比例的に縮小する",
+    )
     parser.add_argument("--sweep", action="store_true", help="ATR倍率・リスクリワード比の感度分析を行う")
     parser.add_argument(
         "--rolling_folds", type=int, default=None,
@@ -340,6 +344,8 @@ def main() -> None:
     if args.correlation_window is not None and args.max_avg_correlation is not None:
         shared_kwargs["correlation_window"] = args.correlation_window
         shared_kwargs["max_avg_correlation"] = args.max_avg_correlation
+    if args.target_portfolio_beta is not None:
+        shared_kwargs["target_portfolio_beta"] = args.target_portfolio_beta
     if args.max_drawdown_pct is not None:
         shared_kwargs["max_drawdown_pct"] = args.max_drawdown_pct
     if args.nikkei_crash_pct is not None or args.beta_weighted_halt_pct is not None:
