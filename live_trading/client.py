@@ -17,11 +17,18 @@ localhostから接続する設計。Binance Testnetのようなクラウド上�
 
 【この時点(2026-08-14)でまだ実機確認できていないこと】
   - Professionalプラン未取得のため、実際にAPIへ接続してのテストは未実施
-  - DelivType/FundType/AccountType等の注文パラメータは、公式サンプルコード
-    (kabucom/kabusapi リポジトリ)の値をそのまま踏襲しているが、全区分の一覧は
-    未確認。値の意味を変える前に、公式リファレンスで再確認すること
+  - 以下のフィールド名・enum値は公式のOpenAPI仕様(kabucom/kabusapi リポジトリの
+    reference/kabu_STATION_API.yaml)を直接取得して裏取り済み(2026-08-14): AccountType
+    (2=一般/4=特定/12=法人)、FrontOrderType(10=成行/20=指値/30=逆指値)、DelivType/FundType、
+    ReverseLimitOrderの構造(TriggerSec/TriggerPrice/UnderOver/AfterHitOrderType/
+    AfterHitPrice)、/wallet/cashのStockAccountWallet、/positionsのValuation(評価金額)、
+    /ordersのState/OrderState/CumQty。ただし実際のレスポンスで一度も確認していないため、
+    型や値の細部(特にDetails配下の約定明細)は初回接続時に生のレスポンスで再確認すること
   - トークンの有効期限(1日単位か、kabuステーションアプリの再起動まで持つか等)も未確認。
     安全側に倒し、クライアントの呼び出しごとに新しいトークンを取得する設計にしている
+  - kabuステーションAPIはOCO注文(利確・損切りのセット注文)に未対応(公式Issue #1119で
+    「内部で検討中」と回答があるのみ、2026-08-14時点)。そのため利確・損切りは別々の注文として
+    出し、どちらかが約定したらもう一方をキャンセルする「疑似OCO」をrun_daily.py側で実装している
 """
 
 import os
@@ -45,16 +52,31 @@ SIDE_BUY = "2"
 
 CASH_MARGIN_CASH = 1  # 現物取引(信用取引は対象外)
 
-# 公式サンプル(kabucom/kabusapi: sample/Python/kabusapi_sendorder_cash_buy.py,
-# kabusapi_sendorder_cash_sell.py)にある値をそのまま採用。値の意味の完全な一覧は
-# 未確認のため、変更する場合は公式リファレンスで裏取りすること。
-DELIV_TYPE_BUY = 2  # 買い注文時(お預り金からの支払いを指すと見られる)
-DELIV_TYPE_SELL = 0  # 売り注文時
-FUND_TYPE_BUY = "AA"  # 買い注文時の資産区分
-FUND_TYPE_SELL = "  "  # 売り注文時は半角スペース2文字(未指定)
-ACCOUNT_TYPE_SPECIFIC = 2  # 特定口座
-FRONT_ORDER_TYPE_LIMIT = 30  # 指値
+# 公式OpenAPI仕様(kabu_STATION_API.yaml)で裏取り済み(2026-08-14)。
+DELIV_TYPE_BUY = 2  # 買い注文時: お預り金
+DELIV_TYPE_SELL = 0  # 売り注文時: 指定なし
+FUND_TYPE_BUY = "AA"  # 買い注文時の資産区分(信用代用)。公式サンプルの値をそのまま採用
+FUND_TYPE_SELL = "  "  # 売り注文時は半角スペース2文字(未指定)必須
+
+ACCOUNT_TYPE_GENERAL = 2  # 一般口座
+ACCOUNT_TYPE_SPECIFIC = 4  # 特定口座
+ACCOUNT_TYPE_CORPORATE = 12  # 法人口座
+
+FRONT_ORDER_TYPE_MARKET = 10  # 成行
+FRONT_ORDER_TYPE_LIMIT = 20  # 指値
+FRONT_ORDER_TYPE_STOP = 30  # 逆指値(ReverseLimitOrderの指定が別途必須)
 EXPIRE_DAY_TODAY_ONLY = 0  # 当日限り
+
+# 逆指値(ReverseLimitOrder)関連のenum値
+TRIGGER_SEC_SYMBOL = 1  # トリガ銘柄: 発注銘柄自身の値段
+UNDER_OVER_BELOW = 1  # トリガ価格「以下」になったら発動(損切りに使う: 下に抜けたら発動)
+UNDER_OVER_ABOVE = 2  # トリガ価格「以上」になったら発動
+AFTER_HIT_ORDER_TYPE_MARKET = 1  # 発動後: 成行
+AFTER_HIT_ORDER_TYPE_LIMIT = 2  # 発動後: 指値
+
+# 注文状態(/ordersのState・OrderState共通)。5(終了)はCumQty(約定数量)で
+# 「約定済み」か「取消/失効/エラーで終わった」かを判別する(CumQty>0なら約定分あり)。
+ORDER_STATE_FINISHED = 5
 
 
 class KabuStationError(Exception):
@@ -66,6 +88,18 @@ def _get_api_password() -> str:
     if not password:
         raise KabuStationError("KABUSTATION_API_PASSWORD が未設定です(.envを確認してください)")
     return password
+
+
+def _get_account_type() -> int:
+    """口座種別(一般/特定/法人)。人によって異なるため.envで明示させる(誤ると全注文が拒否される)。"""
+    raw = os.environ.get("KABUSTATION_ACCOUNT_TYPE", "")
+    mapping = {"general": ACCOUNT_TYPE_GENERAL, "specific": ACCOUNT_TYPE_SPECIFIC, "corporate": ACCOUNT_TYPE_CORPORATE}
+    if raw not in mapping:
+        raise KabuStationError(
+            "KABUSTATION_ACCOUNT_TYPE が未設定、または不正な値です(.envで "
+            "'general'(一般口座)/'specific'(特定口座)/'corporate'(法人口座) のいずれかを指定してください)"
+        )
+    return mapping[raw]
 
 
 class KabuStationClient:
@@ -125,18 +159,17 @@ class KabuStationClient:
         return resp.json()
 
     def get_cash_balance(self) -> float:
-        """現物取引に使える余力(円)。
-
-        レスポンスのフィールド名(CashAccountWallet)は未検証(公式サンプルはリクエストのみ確認済み、
-        実際のレスポンス内容は未確認)。初回接続時に生のレスポンスを一度printして確認すること。
-        """
+        """現物買付可能額(円)。公式OpenAPI仕様で確認済みのフィールド名(StockAccountWallet)。"""
         data = self._request("GET", "/wallet/cash")
-        if "CashAccountWallet" not in data:
-            raise KabuStationError(f"想定していたフィールド(CashAccountWallet)がレスポンスにありません: {data}")
-        return float(data["CashAccountWallet"])
+        if "StockAccountWallet" not in data:
+            raise KabuStationError(f"想定していたフィールド(StockAccountWallet)がレスポンスにありません: {data}")
+        return float(data["StockAccountWallet"])
 
     def get_positions(self, symbol: str | None = None) -> list[dict]:
-        """保有中の建玉一覧。product=1で現物のみに絞る。"""
+        """保有中の建玉一覧。product=1で現物のみに絞る。addinfo=trueで各建玉に
+        CurrentPrice(現在値)・Valuation(評価金額)・ProfitLoss(評価損益額)・
+        ProfitLossRate(評価損益率)が付与される(公式OpenAPI仕様で確認済み)。
+        """
         params = {"product": 1, "addinfo": "true"}
         if symbol:
             params["symbol"] = symbol
@@ -156,7 +189,7 @@ class KabuStationClient:
             "CashMargin": CASH_MARGIN_CASH,
             "DelivType": DELIV_TYPE_BUY,
             "FundType": FUND_TYPE_BUY,
-            "AccountType": ACCOUNT_TYPE_SPECIFIC,
+            "AccountType": _get_account_type(),
             "Qty": quantity,
             "FrontOrderType": FRONT_ORDER_TYPE_LIMIT,
             "Price": price,
@@ -165,7 +198,7 @@ class KabuStationClient:
         return self._request("POST", "/sendorder", json=body)
 
     def send_cash_sell_order(self, symbol: str, quantity: int, price: float) -> dict:
-        """現物の売り注文(指値)。保有株数を超える数量は取引所側で拒否される想定。"""
+        """現物の売り注文(指値・利確用)。保有株数を超える数量は取引所側で拒否される想定。"""
         body = {
             "Symbol": symbol,
             "Exchange": EXCHANGE_TOKYO,
@@ -174,7 +207,7 @@ class KabuStationClient:
             "CashMargin": CASH_MARGIN_CASH,
             "DelivType": DELIV_TYPE_SELL,
             "FundType": FUND_TYPE_SELL,
-            "AccountType": ACCOUNT_TYPE_SPECIFIC,
+            "AccountType": _get_account_type(),
             "Qty": quantity,
             "FrontOrderType": FRONT_ORDER_TYPE_LIMIT,
             "Price": price,
@@ -182,8 +215,39 @@ class KabuStationClient:
         }
         return self._request("POST", "/sendorder", json=body)
 
+    def send_cash_sell_stop_order(self, symbol: str, quantity: int, trigger_price: float) -> dict:
+        """現物の売り注文(逆指値・損切り用)。trigger_price以下になったら成行で即座に売る。
+
+        kabuステーションAPIはOCO注文に対応していないため、利確(send_cash_sell_order)と
+        この損切り注文は別々の注文として管理し、どちらかが約定したらもう一方をキャンセルする
+        「疑似OCO」をrun_daily.py側で行う。AfterHitOrderTypeを成行にしているのは、暴落時に
+        指値では約定しないリスクを避けるため(スリッページより約定確実性を優先)。
+        """
+        body = {
+            "Symbol": symbol,
+            "Exchange": EXCHANGE_TOKYO,
+            "SecurityType": SECURITY_TYPE_STOCK,
+            "Side": SIDE_SELL,
+            "CashMargin": CASH_MARGIN_CASH,
+            "DelivType": DELIV_TYPE_SELL,
+            "FundType": FUND_TYPE_SELL,
+            "AccountType": _get_account_type(),
+            "Qty": quantity,
+            "FrontOrderType": FRONT_ORDER_TYPE_STOP,
+            "Price": 0,
+            "ExpireDay": EXPIRE_DAY_TODAY_ONLY,
+            "ReverseLimitOrder": {
+                "TriggerSec": TRIGGER_SEC_SYMBOL,
+                "TriggerPrice": trigger_price,
+                "UnderOver": UNDER_OVER_BELOW,
+                "AfterHitOrderType": AFTER_HIT_ORDER_TYPE_MARKET,
+                "AfterHitPrice": 0,
+            },
+        }
+        return self._request("POST", "/sendorder", json=body)
+
     def cancel_order(self, order_id: str) -> dict:
-        return self._request("PUT", "/cancelorder", json={"OrderID": order_id})
+        return self._request("PUT", "/cancelorder", json={"OrderId": order_id})
 
     def get_orders(self, symbol: str | None = None) -> list[dict]:
         params = {"product": 1}

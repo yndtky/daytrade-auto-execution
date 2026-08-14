@@ -10,17 +10,24 @@ backtest/strategy.py(ShortlistStrategy)で検証済みのロジックを、backt
     (2026-08-14のバックテスト検証で「保険として有効、ただし過度に厳しいと逆効果」と確認済みの
     しきい値をデフォルトにしている)
 
+【決済(損切り・利確)の管理について】
+kabuステーションAPIはOCO注文(利確・損切りのセット注文)に未対応(公式Issue #1119、
+2026-08-14時点で「内部で検討中」)。そのため、このモジュールは毎回の実行で3段階の
+「疑似OCO」ライフサイクル管理を行う(live_trading/storage.pyのopen_positionsテーブルで追跡):
+  1. entry_pending → 新規買い注文の約定確認。約定していれば損切り(逆指値)・利確(指値)の
+     両方を新たに発注してholdingへ。未約定のまま終了していればclosedへ(何もしない)
+  2. holding → 損切り・利確の両注文の状態を確認。どちらかが約定していれば、もう一方を
+     キャンセルしてclosedへ
+  3. closed → 完了。それ以上何もしない
+毎回の実行の冒頭でこの2段階の確認(reconcile_entry_fills/reconcile_exit_fills)を行ってから、
+サーキットブレーカー判定・新規エントリー走査に進む。
+
 【重要: 2026-08-14時点でまだ実機未検証】
 kabuステーションAPIのProfessionalプランを未取得のため、このモジュール全体が一度も実際の
-APIに接続してテストされていない。特に以下は公式サンプルコードで確認できておらず、
-初めて検証用環境(PRODUCTION=False)に接続した時点で、生のレスポンスを見て確認・修正すること:
-  - get_positions()のレスポンスに含まれる、保有銘柄の評価額のフィールド名
-    (下記ではEvalPriceという仮の名前を使っているが未確認)
-  - get_board()のレスポンスに含まれる、現在値のフィールド名(下記ではCurrentPriceという
-    仮の名前を使っているが未確認)
-検証用環境は常に固定値を返すため、これらの検証自体はできるが、「戦略として正しく動くか」の
-検証にはならない(paper_trading/Binance Testnetと同じ制約。詳細はlive_trading/client.pyの
-docstring参照)。
+APIに接続してテストされていない。client.pyのdocstringに記載の通り、フィールド名・enum値は
+公式OpenAPI仕様で裏取り済みだが、実際のレスポンス(特に/ordersのDetails配下)は未確認。
+検証用環境(ポート18081)は常に固定値を返すため、通信・パース・状態遷移のコードが正しく
+動くかは検証できるが、「戦略として正しく動くか」の検証にはならない。
 
 実行方法(検証用環境がデフォルト):
     python -m live_trading.run_daily
@@ -33,7 +40,7 @@ if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8")
 
 from . import storage
-from .client import KabuStationClient, KabuStationError
+from .client import ORDER_STATE_FINISHED, KabuStationClient, KabuStationError
 from pipeline import risk_management as rm
 from pipeline.fetch_prices import fetch_nikkei225_index
 from pipeline.universe import get_industry_map
@@ -55,6 +62,79 @@ def get_nikkei_today_return() -> float:
     if len(closes) < 2:
         return 0.0
     return float((closes.iloc[-1] / closes.iloc[-2] - 1) * 100)
+
+
+def reconcile_entry_fills(client: KabuStationClient, today: str) -> None:
+    """entry_pending中のポジションについて、買い注文が約定していれば損切り・利確の両注文を出す。"""
+    pending = storage.read_open_positions()
+    pending = pending[pending["status"] == "entry_pending"]
+    if pending.empty:
+        return
+
+    orders_by_id = {o["ID"]: o for o in client.get_orders()}
+    for _, pos in pending.iterrows():
+        order = orders_by_id.get(pos["entry_order_id"])
+        if order is None or order.get("State") != ORDER_STATE_FINISHED:
+            continue  # まだ処理中、または注文情報が見つからない(次回の実行で再確認)
+
+        filled_qty = int(order.get("CumQty", 0))
+        if filled_qty <= 0:
+            storage.close_position(pos["id"], today, "entry_unfilled")
+            print(f"エントリー未約定のため終了: {pos['ticker']}")
+            continue
+
+        try:
+            stop_order = client.send_cash_sell_stop_order(pos["ticker"], filled_qty, pos["stop_price"])
+            target_order = client.send_cash_sell_order(pos["ticker"], filled_qty, pos["target_price"])
+            stop_id = stop_order.get("OrderId")
+            target_id = target_order.get("OrderId")
+            storage.mark_position_holding(pos["id"], filled_qty, stop_id, target_id)
+            storage.log_order(today, pos["ticker"], "SELL_STOP", filled_qty, pos["stop_price"], stop_id, "SENT")
+            storage.log_order(today, pos["ticker"], "SELL_TARGET", filled_qty, pos["target_price"], target_id, "SENT")
+            print(
+                f"エントリー約定確認: {pos['ticker']} {filled_qty}株 → "
+                f"損切り{pos['stop_price']:.0f}円/利確{pos['target_price']:.0f}円の決済注文を発注"
+            )
+        except KabuStationError as e:
+            print(f"⚠ {pos['ticker']}: 決済注文の発注に失敗(次回の実行で再試行が必要): {e}")
+
+
+def reconcile_exit_fills(client: KabuStationClient, today: str) -> None:
+    """holding中のポジションについて、損切り・利確のどちらかが約定していればもう一方をキャンセルする(疑似OCO)。"""
+    holding = storage.read_open_positions()
+    holding = holding[holding["status"] == "holding"]
+    if holding.empty:
+        return
+
+    orders_by_id = {o["ID"]: o for o in client.get_orders()}
+
+    def _is_filled(order_id: str) -> bool:
+        order = orders_by_id.get(order_id)
+        return order is not None and order.get("State") == ORDER_STATE_FINISHED and int(order.get("CumQty", 0)) > 0
+
+    for _, pos in holding.iterrows():
+        stop_filled = _is_filled(pos["stop_order_id"])
+        target_filled = _is_filled(pos["target_order_id"])
+
+        if stop_filled and target_filled:
+            print(f"⚠ {pos['ticker']}: 損切り・利確が両方約定と判定(通常あり得ない異常系、要手動確認)")
+            storage.close_position(pos["id"], today, "both_filled_anomaly")
+            continue
+
+        if stop_filled:
+            try:
+                client.cancel_order(pos["target_order_id"])
+            except KabuStationError as e:
+                print(f"⚠ {pos['ticker']}: 利確注文のキャンセル失敗(手動確認が必要): {e}")
+            storage.close_position(pos["id"], today, "stop_hit")
+            print(f"損切り約定: {pos['ticker']}(利確注文はキャンセル)")
+        elif target_filled:
+            try:
+                client.cancel_order(pos["stop_order_id"])
+            except KabuStationError as e:
+                print(f"⚠ {pos['ticker']}: 損切り注文のキャンセル失敗(手動確認が必要): {e}")
+            storage.close_position(pos["id"], today, "target_hit")
+            print(f"利確約定: {pos['ticker']}(損切り注文はキャンセル)")
 
 
 def check_halt(account_value: float, nikkei_return: float, portfolio_beta: float) -> tuple[bool, str | None]:
@@ -82,10 +162,12 @@ def run(today: str | None = None, production: bool = False) -> None:
     client = KabuStationClient(production=production)
     client.authenticate()
 
+    reconcile_entry_fills(client, today)
+    reconcile_exit_fills(client, today)
+
     cash = client.get_cash_balance()
     positions = client.get_positions()
-    # NOTE: 評価額のフィールド名は未確認(モジュールdocstring参照)。実機接続時に要修正。
-    holdings_value = sum(float(p.get("EvalPrice", 0)) for p in positions)
+    holdings_value = sum(float(p.get("Valuation", 0)) for p in positions)
     account_value = cash + holdings_value
 
     held_tickers = {str(p["Symbol"]) for p in positions}
@@ -102,7 +184,7 @@ def run(today: str | None = None, production: bool = False) -> None:
         total_value, weighted = 0.0, 0.0
         for p in positions:
             ticker = str(p["Symbol"])
-            value = float(p.get("EvalPrice", 0))
+            value = float(p.get("Valuation", 0))
             beta = beta_by_ticker.get(ticker) or 1.0
             total_value += value
             weighted += value * beta
@@ -117,7 +199,7 @@ def run(today: str | None = None, production: bool = False) -> None:
     print(f"日経平均当日リターン: {nikkei_return:+.2f}% ／ 保有銘柄の加重平均β: {portfolio_beta:.2f}")
 
     if halted:
-        print(f"⚠ 新規エントリーを停止(理由: {halt_reason})。既存ポジションの管理は別途手動または今後の実装で対応。")
+        print(f"⚠ 新規エントリーを停止(理由: {halt_reason})。既存ポジションの損切り・利確注文はそのまま有効。")
         return
 
     industry_position_count: dict[str, int] = {}
@@ -144,15 +226,20 @@ def run(today: str | None = None, production: bool = False) -> None:
             continue
 
         stop = rm.stop_loss_price(entry_price, atr)
+        target = rm.take_profit_price(entry_price, stop)
         shares = rm.position_size_shares(account_value, RISK_PCT, entry_price, stop, LOT_SIZE)
         if shares <= 0:
             continue
 
         try:
             order = client.send_cash_buy_order(ticker, shares, entry_price)
-            order_id = order.get("OrderId") or order.get("OrderID")
+            order_id = order.get("OrderId")
             storage.log_order(today, ticker, "BUY", shares, entry_price, order_id, "SENT")
-            print(f"発注: 買い {ticker} {shares}株 @ {entry_price}円(注文ID: {order_id})")
+            storage.open_position(ticker, today, order_id, shares, entry_price, stop, target)
+            print(
+                f"発注: 買い {ticker} {shares}株 @ {entry_price}円(注文ID: {order_id}、"
+                f"損切り予定{stop:.0f}円/利確予定{target:.0f}円)"
+            )
             if industry:
                 industry_position_count[industry] = industry_position_count.get(industry, 0) + 1
         except KabuStationError as e:
