@@ -194,13 +194,14 @@ def run_pooled_split_check(
     print("※ いずれも過去データ上のシミュレーションであり、将来の利益を保証するものではない(銘柄ごとに独立した口座を想定した集計)。")
 
 
-def run_sweep(signals_by_ticker: dict, cutoff: pd.Timestamp, capital: float, commission_pct: float, slippage_pct: float) -> None:
+def run_sweep(signals_by_ticker: dict, cutoff: pd.Timestamp, capital: float, commission_pct: float, slippage_pct: float) -> dict | None:
     in_sample, out_of_sample = split_signals(signals_by_ticker, cutoff)
 
     print(f"\n=== パラメータ感度分析(in-sampleのみで評価、分割日: {cutoff.date()}) ===")
     print(f"デフォルト: ATR倍率={rm.ATR_STOP_MULTIPLIER}, リスクリワード比={rm.RISK_REWARD_RATIO}")
 
     rows = []
+    time_returns_by_label = {}
     for atr_mult, rr in itertools.product(ATR_MULTIPLIER_GRID, RISK_REWARD_GRID):
         kwargs = {"atr_multiplier": atr_mult, "risk_reward_ratio": rr}
         result = run_backtest_on_signals(in_sample, capital, commission_pct, slippage_pct, kwargs)
@@ -209,16 +210,41 @@ def run_sweep(signals_by_ticker: dict, cutoff: pd.Timestamp, capital: float, com
         s["risk_reward_ratio"] = rr
         rows.append(s)
         print_row(f"ATR{atr_mult}/RR{rr}", s)
+        if result is not None:
+            time_returns_by_label[f"ATR{atr_mult}_RR{rr}"] = result["time_return"]
 
     ranked = [r for r in rows if r["trades"] >= MIN_TRADES_FOR_RANKING and r["sqn"] is not None]
     ranked.sort(key=lambda r: r["sqn"], reverse=True)
 
     if not ranked:
         print("\n有効なトレード数を確保できた組み合わせがなく、感度分析の結論は出せない。")
-        return
+        return None
 
     best = ranked[0]
     print(f"\nin-sampleでのSQN最良: ATR倍率={best['atr_multiplier']}, リスクリワード比={best['risk_reward_ratio']} (SQN={best['sqn']})")
+
+    # PBO(Probability of Backtest Overfitting): 9通りの候補のうちin-sampleで一番良かった
+    # ものが、実は偶然の勝者に過ぎない確率をCSCV(組み合わせ対称交差検証)で定量化する
+    # (2026-08-14、IKEDAさんの記事を受けて追加)。in-sample期間のみを使う
+    # (out-of-sampleは最終確認用に封印したままにする、という既存の方針を崩さないため)。
+    pbo_result = None
+    try:
+        from .pbo import build_returns_matrix, compute_pbo
+
+        returns_matrix = build_returns_matrix(time_returns_by_label)
+        pbo_result = compute_pbo(returns_matrix, n_blocks=10)
+        print(
+            f"\nPBO(選んだ設定が偶然の勝者である確率、CSCV): {pbo_result['pbo']:.2f} "
+            f"({pbo_result['n_splits']}通りの分割で推定)"
+        )
+        if pbo_result["pbo"] >= 0.5:
+            print("⚠ PBOが0.5以上。in-sampleで一番良く見えた設定は、選んでも選ばなくても大差ない可能性が高い。")
+        elif pbo_result["pbo"] >= 0.3:
+            print("△ PBOがやや高め。選んだ設定への過度な期待は禁物。")
+        else:
+            print("✓ PBOは低め。in-sampleの勝者は偶然ではなく、比較的安定して良い可能性が高い。")
+    except Exception as e:  # noqa: BLE001
+        print(f"\n(PBO計算をスキップ: {e})")
 
     print("\n--- この組み合わせをout-of-sampleで再検証 ---")
     best_kwargs = {"atr_multiplier": best["atr_multiplier"], "risk_reward_ratio": best["risk_reward_ratio"]}
@@ -232,6 +258,8 @@ def run_sweep(signals_by_ticker: dict, cutoff: pd.Timestamp, capital: float, com
         print("  これはまさにパラメータ調整がin-sampleへの過学習になっている典型例。デフォルト値を変えない方が無難。")
     else:
         print("\n✓ in-sampleで良かった組み合わせは、out-of-sampleでも(少なくともデフォルトを下回らない程度に)機能している。")
+
+    return pbo_result
 
 
 def run_rolling_folds(
@@ -392,13 +420,17 @@ def main() -> None:
         cutoff = max(latest_dates) - pd.Timedelta(days=int(args.oos_years * 365))
         run_pooled_split_check(signals_by_ticker, cutoff, args.capital, args.commission_pct, args.slippage_pct, strategy_kwargs)
         run_split_check(signals_by_ticker, cutoff, args.capital, args.commission_pct, args.slippage_pct, shared_kwargs)
+        pbo_result = None
         if args.sweep:
-            run_sweep(signals_by_ticker, cutoff, args.capital, args.commission_pct, args.slippage_pct)
+            pbo_result = run_sweep(signals_by_ticker, cutoff, args.capital, args.commission_pct, args.slippage_pct)
+        headline = "(詳細はコンソール出力参照。in-sample/out-of-sample分割検証)"
+        if pbo_result is not None:
+            headline += f" PBO={pbo_result['pbo']:.2f}({pbo_result['n_splits']}分割)"
         log_experiment(
             script="walkforward.py",
             config_summary=config_summary + f" oos_years={args.oos_years} sweep={args.sweep}",
-            method="split_check" + ("+sweep" if args.sweep else ""),
-            headline_metric="(詳細はコンソール出力・ログ参照。in-sample/out-of-sample分割検証)",
+            method="split_check" + ("+sweep+PBO" if args.sweep else ""),
+            headline_metric=headline,
             verdict="info",
             notes="自動記録。採用/不採用の判断は別途人間が行う。",
         )
