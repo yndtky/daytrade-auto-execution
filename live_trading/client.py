@@ -32,6 +32,7 @@ localhostから接続する設計。Binance Testnetのようなクラウド上�
 """
 
 import os
+import time
 from pathlib import Path
 
 import requests
@@ -42,6 +43,13 @@ load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 PORT_PRODUCTION = 18080
 PORT_VALIDATION = 18081
 REQUEST_TIMEOUT_SEC = 10
+GET_MAX_RETRIES = 3  # GET(読み取り専用)のみリトライ対象。POST/PUTは二重発注防止のため対象外
+GET_RETRY_BACKOFF_SEC = 2
+
+# 発注APIは5件/秒、情報系・余力系は10件/秒の流量制限がある(公式ユーザーポリシー、2026-08-14
+# 外部資料で把握)。1回の実行で送るリクエスト数は数件〜十数件程度(小口座・少数ポジション)で
+# 通常は問題にならないはずだが、安全のため各リクエストの間に最低限の間隔を空ける。
+MIN_REQUEST_INTERVAL_SEC = 0.25
 
 # 東証(現物取引で使う唯一の市場)。他の市場コードは今回のスコープ外。
 EXCHANGE_TOKYO = 1
@@ -150,16 +158,38 @@ class KabuStationClient:
         return {"Content-Type": "application/json", "X-API-KEY": self._token}
 
     def _request(self, method: str, path: str, **kwargs) -> dict | list:
-        try:
-            resp = requests.request(
-                method, f"{self.base_url}{path}", headers=self._headers(), timeout=REQUEST_TIMEOUT_SEC, **kwargs
-            )
-        except requests.exceptions.RequestException as e:
-            raise KabuStationError(f"{method} {path} で通信エラー: {e}") from e
+        """method=GETのみ、通信エラー・5xxを自動リトライする(最大GET_MAX_RETRIES回、指数バックオフ)。
 
-        if resp.status_code != 200:
-            raise KabuStationError(f"{method} {path} が{resp.status_code}で失敗: {resp.text}")
-        return resp.json()
+        POST/PUT(sendorder/cancelorderなど、状態を変える発注系)は意図的にリトライしない:
+        タイムアウトは「応答が届かなかっただけで、注文自体はサーバー側で成立していた」場合との
+        区別が付かないため、機械的にリトライすると二重発注を引き起こしかねない(2026-08-14、
+        外部資料の指摘で設計を見直した)。発注系が失敗した場合は例外をそのまま呼び出し側に伝え、
+        実際に注文が通ったかどうかはGET /ordersで確認してから次の行動を判断すること
+        (run_daily.pyの疑似OCO管理は、まさにこの確認を毎回の実行で行う設計になっている)。
+        """
+        time.sleep(MIN_REQUEST_INTERVAL_SEC)
+
+        attempts = GET_MAX_RETRIES if method == "GET" else 1
+        last_error: KabuStationError | None = None
+        for attempt in range(1, attempts + 1):
+            try:
+                resp = requests.request(
+                    method, f"{self.base_url}{path}", headers=self._headers(), timeout=REQUEST_TIMEOUT_SEC, **kwargs
+                )
+            except requests.exceptions.RequestException as e:
+                last_error = KabuStationError(f"{method} {path} で通信エラー: {e}")
+            else:
+                if resp.status_code == 200:
+                    return resp.json()
+                if 400 <= resp.status_code < 500:
+                    # 認証エラー・不正リクエスト等はリトライしても直らないので即座に失敗させる
+                    raise KabuStationError(f"{method} {path} が{resp.status_code}で失敗: {resp.text}")
+                last_error = KabuStationError(f"{method} {path} が{resp.status_code}で失敗: {resp.text}")
+
+            if attempt < attempts:
+                time.sleep(GET_RETRY_BACKOFF_SEC * attempt)
+
+        raise last_error
 
     def get_cash_balance(self) -> float:
         """現物買付可能額(円)。公式OpenAPI仕様で確認済みのフィールド名(StockAccountWallet)。"""

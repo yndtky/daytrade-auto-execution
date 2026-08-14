@@ -222,9 +222,16 @@ def run(today: str | None = None, production: bool = False, base_url: str | None
     if supervised_tickers:
         print(f"監理・整理銘柄(新規エントリー対象外): {len(supervised_tickers)}銘柄")
 
+    # 実口座の保有(held_tickers)だけでなく、まだ約定確認前(entry_pending)・決済待ち(holding)の
+    # 自分の未決済ポジションも重複エントリー防止の対象にする。実口座残高だけを見ていると、
+    # 同じ日にrun_daily.pyを2回実行した場合(手動リトライ・誤操作等)、1回目の買い注文が
+    # まだ約定していない間に2回目が同じ銘柄へまた買い注文を出してしまう(2026-08-14、
+    # 外部資料の指摘で気づいた実在のリスク)。
+    pending_or_holding_tickers = set(storage.read_open_positions()["ticker"])
+
     for _, row in shortlist.iterrows():
         ticker = str(row["ticker"])
-        if ticker in held_tickers:
+        if ticker in held_tickers or ticker in pending_or_holding_tickers:
             continue
 
         if ticker in supervised_tickers:
