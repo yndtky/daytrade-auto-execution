@@ -1,10 +1,12 @@
 name: ペーパートレード(Binance Testnet)
 
-# 15分おきに実行。無料枠のみ・実際のお金は一切動かないテストネット環境。
-# GitHub Actionsのスケジュール実行は指定時刻ちょうどではなく、数分遅れることがあります。
+# 【スケジュール実行は無効化済み(2026-08-14)】GitHub Actionsのランナーは米国IPのため、
+# Binanceが一律ブロックしており(HTTP 451、実測で確認済み)、cronで自動実行しても必ず
+# 失敗する。実際の実行はローカルPCのタスクスケジューラ(paper_trading/run_cycle_task.ps1、
+# 15分おき)で行っている。将来、米国以外のセルフホストランナー等が使えるようになったら
+# schedule行を復活させる。workflow_dispatchは検証用に残す(手動実行も同じ理由で失敗するが、
+# 挙動を再確認したい時のため)。
 on:
-  schedule:
-    - cron: "*/15 * * * *"
   workflow_dispatch: {}
 
 permissions:
