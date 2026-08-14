@@ -26,6 +26,9 @@ jobs:
         run: pip install -r requirements.txt
 
       - name: パイプライン実行
+        env:
+          GOOGLE_CREDENTIALS_JSON: ${{ secrets.GOOGLE_CREDENTIALS_JSON }}
+          GOOGLE_SHEET_ID: ${{ secrets.GOOGLE_SHEET_ID }}
         run: python -m pipeline.run_daily
 
       - name: クラウド公開用スナップショットを更新
