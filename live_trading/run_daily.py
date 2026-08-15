@@ -39,6 +39,7 @@ APIに接続してテストされていない。client.pyのdocstringに記載�
 
 import datetime as dt
 import sys
+from pathlib import Path
 
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8")
@@ -58,6 +59,32 @@ MAX_POSITIONS_PER_INDUSTRY = 1
 MAX_DRAWDOWN_PCT = 30.0
 NIKKEI_CRASH_PCT = 5.0
 BETA_WEIGHTED_HALT_PCT = 5.0
+
+# 二重起動防止用ロック(2026-08-15、外部資料の指摘: 複数プロセス・複数タスクが同じ口座を
+# 同時に操作すると余力・保有数量が競合する)。タスクスケジューラの手動再実行や設定ミスで
+# 同時に2つ動いてしまっても、片方が確実に中止するようにする。
+LOCK_PATH = Path(__file__).resolve().parent.parent / "data" / "run_daily.lock"
+LOCK_STALE_AFTER_MINUTES = 30  # この時間を超えて残っているロックは前回異常終了の残骸とみなす
+
+
+def _acquire_lock() -> None:
+    if LOCK_PATH.exists():
+        age = dt.datetime.now() - dt.datetime.fromtimestamp(LOCK_PATH.stat().st_mtime)
+        if age < dt.timedelta(minutes=LOCK_STALE_AFTER_MINUTES):
+            raise RuntimeError(
+                f"live_trading.run_daily は既に実行中の可能性があります"
+                f"(ロックファイルが{age}前に作成)。多重起動を避けるため中止します。"
+            )
+        print(f"⚠ 古いロックファイル({age}前)を検知。前回異常終了の残骸とみなして上書きします。")
+    LOCK_PATH.parent.mkdir(parents=True, exist_ok=True)
+    LOCK_PATH.write_text(dt.datetime.now().isoformat())
+
+
+def _release_lock() -> None:
+    try:
+        LOCK_PATH.unlink()
+    except FileNotFoundError:
+        pass
 
 
 def get_nikkei_today_return() -> float:
@@ -92,6 +119,11 @@ def reconcile_entry_fills(client: KabuStationClient, today: str) -> None:
             target_order = client.send_cash_sell_order(pos["ticker"], filled_qty, pos["target_price"])
             stop_id = stop_order.get("OrderId")
             target_id = target_order.get("OrderId")
+            if not stop_id or not target_id:
+                # OrderIdが欠けたまま追跡を続けると、そのレッグが約定/失効しても二度と検知
+                # できず、無防備なまま気づかれない可能性がある。ここでは記録だけ残して大声で
+                # 警告し、人間の確認を促す(2026-08-15、外部資料の指摘: 追跡不能な応答の罠)。
+                print(f"⚠⚠⚠ {pos['ticker']}: 決済注文の応答にOrderIdが欠けている(損切り={stop_id}, 利確={target_id})。手動確認が必須。")
             storage.mark_position_holding(pos["id"], filled_qty, stop_id, target_id)
             storage.log_order(today, pos["ticker"], "SELL_STOP", filled_qty, pos["stop_price"], stop_id, "SENT")
             storage.log_order(today, pos["ticker"], "SELL_TARGET", filled_qty, pos["target_price"], target_id, "SENT")
@@ -201,6 +233,19 @@ def run(today: str | None = None, production: bool = False, base_url: str | None
     held_tickers = {str(p["Symbol"]) for p in positions}
     industry_map = get_industry_map()
 
+    # 手動介入の検知(2026-08-15、外部資料の指摘: アプリから手動で売却した場合、内部の
+    # open_positions(holding状態)と実口座の保有がズレる。気づかずに存在しない建玉の
+    # 決済注文を管理し続けると、次のエントリー判断や口座評価額の計算も歪む。
+    # holding中のはずが実口座に見当たらない銘柄は、手動介入または想定外の消滅とみなして
+    # 安全に閉じる(決済注文自体は証券会社側で自動的に無効化されるはずだが、
+    # こちらの記録を実態に合わせておく)。
+    holding_positions = storage.read_open_positions()
+    holding_positions = holding_positions[holding_positions["status"] == "holding"]
+    for _, pos in holding_positions.iterrows():
+        if pos["ticker"] not in held_tickers:
+            print(f"⚠⚠ {pos['ticker']}: holding中のはずが実口座に保有が見つからない(手動売却等の可能性)。記録を閉じます。")
+            storage.close_position(pos["id"], today, "manual_intervention_detected")
+
     daily_metrics = read_daily_metrics(today)
     if daily_metrics.empty:
         print(f"⚠ {today}のdaily_metricsがありません。pipeline.run_dailyが先に実行されている必要があります。")
@@ -288,6 +333,15 @@ def run(today: str | None = None, production: bool = False, base_url: str | None
         try:
             order = client.send_cash_buy_order(ticker, shares, entry_price)
             order_id = order.get("OrderId")
+            # OrderIdが空/None(見かけ上は成功でも追跡不能な応答)の場合、そのまま
+            # open_position()すると entry_order_id=None のポジションが永久にentry_pendingの
+            # まま迷子になる(reconcile_entry_fillsはNoneに一致する注文を絶対に見つけられない)。
+            # 追跡できない発注は「成功」扱いにせず、エラーとして記録する
+            # (2026-08-15、外部資料の指摘: order_id=0/Noneを正常応答として扱う罠)。
+            if not order_id:
+                storage.log_order(today, ticker, "BUY", shares, entry_price, None, "ERROR", note=f"OrderIdが空の応答: {order}")
+                print(f"⚠⚠ {ticker}: 発注応答にOrderIdが含まれず、追跡不能。手動確認が必要: {order}")
+                continue
             storage.log_order(today, ticker, "BUY", shares, entry_price, order_id, "SENT")
             storage.open_position(ticker, today, order_id, shares, entry_price, stop, target)
             remaining_cash -= shares * entry_price
@@ -305,12 +359,16 @@ def run(today: str | None = None, production: bool = False, base_url: str | None
 
 
 def run_safely(today: str | None = None, production: bool = False, base_url: str | None = None) -> None:
-    """run()を例外から保護するラッパー。予期しないエラーで異常終了しても、
-    その日の失敗をdaily_runsに記録してから再送出する(2026-08-14、外部資料の指摘を受けて追加。
-    元のrun()は例外発生時にstorage.log_daily_run()を一度も呼ばずに落ちるため、後から
-    「その日は何が起きて止まったのか」が記録に残らなかった)。
+    """run()を例外から保護し、多重起動を防ぐラッパー。
+
+    - 多重起動防止: ロックファイルを取得できなければ、それだけを理由に即座に中止する
+      (「その日の運用に失敗した」わけではないので、daily_runsへの失敗記録は行わない)。
+    - 予期しないエラーで異常終了しても、その日の失敗をdaily_runsに記録してから再送出する
+      (2026-08-14、外部資料の指摘を受けて追加。元のrun()は例外発生時にstorage.log_daily_run()
+      を一度も呼ばずに落ちるため、後から「その日は何が起きて止まったのか」が記録に残らなかった)。
     """
     run_date = today or dt.date.today().isoformat()
+    _acquire_lock()  # 既に実行中ならここで例外を投げてそのまま終了(ロックは取得できていないので解放不要)
     try:
         run(today=run_date, production=production, base_url=base_url)
     except Exception as e:  # noqa: BLE001
@@ -321,6 +379,8 @@ def run_safely(today: str | None = None, production: bool = False, base_url: str
         except Exception:  # noqa: BLE001
             pass  # 記録自体に失敗しても、元の例外を握りつぶさず必ず再送出する
         raise
+    finally:
+        _release_lock()
 
 
 if __name__ == "__main__":

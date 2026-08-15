@@ -13,6 +13,7 @@ data/paper_trading.db
 data/paper_trading_task.log
 paper_trading/run_cycle_task.ps1
 data/live_trading.db
+data/run_daily.lock
 .env
 __pycache__/
 *.pyc
