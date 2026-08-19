@@ -490,6 +490,47 @@ if sheets_ready:
 else:
     st.caption("Googleシート連携の設定後に経過観察が使えます。")
 
+st.header("ピックアップ銘柄の的中率(選出後リターンの自動集計)")
+st.caption(
+    "「本日の注目銘柄」等に選ばれた銘柄が、選出後1・3・5・10営業日でどう動いたかを自動集計する。"
+    "毎日の自動実行でdaily_metricsが積み上がるほど精度が上がる。選出条件やスコアの重み付けを"
+    "この結果から自動調整する仕組みではない(過学習を避けるため、判断は常に人間が行う)。"
+)
+
+from pipeline.pick_performance import compute_pick_returns, summarize_pick_performance  # noqa: E402
+
+
+@st.cache_data(ttl=300)
+def _pick_returns():
+    return compute_pick_returns()
+
+
+pick_returns = _pick_returns()
+if pick_returns.empty:
+    st.caption("集計対象のデータがまだありません。")
+else:
+    summary = summarize_pick_performance(pick_returns)
+    if summary.empty:
+        st.caption("まだ後日データが蓄積されていません(選出の翌営業日以降、自動実行のたびに増えていきます)。")
+    else:
+        st.caption(f"集計対象イベント数(延べ): {len(pick_returns)}件")
+        st.dataframe(
+            summary.rename(columns={
+                "axis": "軸", "horizon_days": "選出後(営業日)", "n": "件数",
+                "hit_rate_pct": "的中率(%)", "mean_return_pct": "平均リターン(%)",
+                "median_return_pct": "中央値リターン(%)",
+            }),
+            use_container_width=True,
+            hide_index=True,
+        )
+
+        with st.expander("個別のピックアップ履歴を見る"):
+            st.dataframe(
+                pick_returns.sort_values("date", ascending=False),
+                use_container_width=True,
+                hide_index=True,
+            )
+
 st.header("トレード記録")
 if sheets_ready:
     ticker_options = shortlist["ticker"].tolist() if not shortlist.empty else []
