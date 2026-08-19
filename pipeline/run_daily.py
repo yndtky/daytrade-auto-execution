@@ -81,6 +81,11 @@ def run(today: str | None = None, session_label: str = "朝", run_extras: bool =
                 "is_manufacturing": bool(is_manufacturing_by_ticker.get(ticker, False)),
                 "close": metrics["close"],
                 "volume": metrics["volume"],
+                "dividend_per_share": (
+                    float(df["Dividends"].iloc[-1])
+                    if "Dividends" in df.columns and pd.notna(df["Dividends"].iloc[-1])
+                    else 0.0
+                ),
                 "rsi14": metrics["rsi14"],
                 "rsi_flag": metrics["rsi_flag"],
                 "obv_divergence_flag": metrics["obv_divergence_flag"],

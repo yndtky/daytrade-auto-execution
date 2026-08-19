@@ -38,10 +38,18 @@ def compute_pick_returns(horizons: tuple[int, ...] = DEFAULT_HORIZONS) -> pd.Dat
     trading_dates = sorted(all_data["date"].unique())
     date_index = {d: i for i, d in enumerate(trading_dates)}
 
-    # 銘柄別に「日付→終値」の対応表を作っておく(繰り返しlookupを避けて高速化)
+    # 銘柄別に「日付→終値」「日付→配当額」の対応表を作っておく(繰り返しlookupを避けて高速化)
     price_by_ticker: dict[str, dict[str, float]] = {
         ticker: dict(zip(g["date"], g["close"])) for ticker, g in all_data.groupby("ticker")
     }
+    # 保有期間中に権利落ちをまたぐと、株価だけを見た場合は下落分がそのまま「損失」に
+    # 見えてしまう(実際は同額が配当金として口座に入るため、経済的には損していない)。
+    # daily_metricsのdividend_per_share(2026-08-20追加、それ以前の日付はNaN=0扱い)を
+    # 選出日の翌日〜評価日までの区間で合算し、価格リターンに足し戻すことで補正する。
+    dividend_by_ticker: dict[str, dict[str, float]] = {
+        ticker: dict(zip(g["date"], g["dividend_per_share"].fillna(0)))
+        for ticker, g in all_data.groupby("ticker")
+    } if "dividend_per_share" in all_data.columns else {}
 
     rows = []
     for axis_name, flag_col in AXES.items():
@@ -56,15 +64,21 @@ def compute_pick_returns(horizons: tuple[int, ...] = DEFAULT_HORIZONS) -> pd.Dat
                 "axis": axis_name, "entry_price": entry_price,
             }
             date_pos = date_index[date]
+            divs = dividend_by_ticker.get(ticker, {})
             for h in horizons:
                 future_pos = date_pos + h
                 future_price = None
                 if future_pos < len(trading_dates):
                     future_price = price_by_ticker.get(ticker, {}).get(trading_dates[future_pos])
-                record[f"return_{h}d_pct"] = (
-                    round((future_price / entry_price - 1) * 100, 2)
-                    if future_price and future_price > 0 else None
-                )
+                if future_price and future_price > 0:
+                    dividends_received = sum(
+                        divs.get(d, 0.0) for d in trading_dates[date_pos + 1 : future_pos + 1]
+                    )
+                    record[f"return_{h}d_pct"] = round(
+                        ((future_price + dividends_received) / entry_price - 1) * 100, 2
+                    )
+                else:
+                    record[f"return_{h}d_pct"] = None
             rows.append(record)
 
     return pd.DataFrame(rows)

@@ -20,6 +20,7 @@ CREATE TABLE IF NOT EXISTS daily_metrics (
     is_manufacturing INTEGER,
     close REAL,
     volume REAL,
+    dividend_per_share REAL,
     rsi14 REAL,
     rsi_flag INTEGER,
     obv_divergence_flag INTEGER,
@@ -49,10 +50,26 @@ CREATE TABLE IF NOT EXISTS daily_metrics (
 """
 
 
+# 2026-08-20追加: 既存DBにはCREATE TABLE IF NOT EXISTSだけでは新しい列が増えないため、
+# ALTER TABLEで移行する(列が既にあればsqlite3.OperationalErrorを無視するだけでよい)。
+_MIGRATIONS = (
+    "ALTER TABLE daily_metrics ADD COLUMN dividend_per_share REAL",
+)
+
+
+def _migrate(conn: sqlite3.Connection) -> None:
+    for stmt in _MIGRATIONS:
+        try:
+            conn.execute(stmt)
+        except sqlite3.OperationalError:
+            pass  # 列が既に存在する場合はこれでよい
+
+
 def _connect() -> sqlite3.Connection:
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(DB_PATH)
     conn.execute(SCHEMA)
+    _migrate(conn)
     return conn
 
 
@@ -61,13 +78,14 @@ def _read_connect() -> sqlite3.Connection:
     path = DB_PATH if DB_PATH.exists() else CLOUD_SNAPSHOT_PATH
     conn = sqlite3.connect(path)
     conn.execute(SCHEMA)
+    _migrate(conn)
     return conn
 
 
 def upsert_daily_metrics(df: pd.DataFrame) -> None:
     """dfは daily_metrics のカラムを含む必要がある。同じ(date, ticker)は上書き。"""
     cols = [
-        "date", "ticker", "name", "industry", "is_manufacturing", "close", "volume", "rsi14", "rsi_flag",
+        "date", "ticker", "name", "industry", "is_manufacturing", "close", "volume", "dividend_per_share", "rsi14", "rsi_flag",
         "obv_divergence_flag", "buy_pressure_score",
         "golden_cross_flag", "golden_cross_recent_flag", "uptrend_turning_flag",
         "liquidity_ok", "ytd_decline_pct", "sold_more_than_nikkei_flag",

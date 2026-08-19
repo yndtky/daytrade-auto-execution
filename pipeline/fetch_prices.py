@@ -36,6 +36,8 @@ def fetch_ohlcv(tickers: list[str]) -> dict[str, pd.DataFrame]:
     """銘柄コードのリストを受け取り、{コード: OHLCV DataFrame} を返す。
 
     取得に失敗した銘柄は結果に含めない(呼び出し側でログ確認可能)。
+    OHLCVに加えて配当実績(Dividends列、1株あたりの円額。配当が無い日は0)も含む
+    (2026-08-20、pick_performance.pyでの選出後リターン集計に配当落ち分を反映するため追加)。
     """
     result: dict[str, pd.DataFrame] = {}
 
@@ -51,6 +53,7 @@ def fetch_ohlcv(tickers: list[str]) -> dict[str, pd.DataFrame]:
             threads=True,
             progress=False,
             auto_adjust=True,
+            actions=True,
         )
 
         for code, yf_symbol in zip(chunk, yf_symbols):
