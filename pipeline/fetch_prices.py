@@ -25,7 +25,7 @@ def fetch_nikkei225_index() -> pd.DataFrame:
         period=PERIOD,
         interval="1d",
         progress=False,
-        auto_adjust=False,
+        auto_adjust=True,
     )
     if isinstance(data.columns, pd.MultiIndex):
         data.columns = data.columns.get_level_values(0)
@@ -50,7 +50,7 @@ def fetch_ohlcv(tickers: list[str]) -> dict[str, pd.DataFrame]:
             group_by="ticker",
             threads=True,
             progress=False,
-            auto_adjust=False,
+            auto_adjust=True,
         )
 
         for code, yf_symbol in zip(chunk, yf_symbols):
@@ -87,7 +87,7 @@ def fetch_intraday_latest(tickers: list[str]) -> dict[str, float]:
             group_by="ticker",
             threads=True,
             progress=False,
-            auto_adjust=False,
+            auto_adjust=True,
         )
 
         for code, yf_symbol in zip(chunk, yf_symbols):

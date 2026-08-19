@@ -28,7 +28,7 @@ def fetch_history(ticker: str, years: int) -> pd.DataFrame:
         period=f"{years}y",
         interval="1d",
         progress=False,
-        auto_adjust=False,
+        auto_adjust=True,
     )
     if isinstance(data.columns, pd.MultiIndex):
         data.columns = data.columns.get_level_values(0)
@@ -41,7 +41,7 @@ NIKKEI225_INDEX_SYMBOL = "^N225"
 def fetch_nikkei_history(years: int) -> pd.DataFrame:
     """日経平均指数の複数年OHLCVを取得する(ポートフォリオ全体のβ計算・急落フィルター用)。"""
     data = yf.download(
-        NIKKEI225_INDEX_SYMBOL, period=f"{years}y", interval="1d", progress=False, auto_adjust=False
+        NIKKEI225_INDEX_SYMBOL, period=f"{years}y", interval="1d", progress=False, auto_adjust=True
     )
     if isinstance(data.columns, pd.MultiIndex):
         data.columns = data.columns.get_level_values(0)
@@ -65,7 +65,7 @@ def fetch_history_bulk(tickers: list[str], years: int) -> dict[str, pd.DataFrame
             group_by="ticker",
             threads=True,
             progress=False,
-            auto_adjust=False,
+            auto_adjust=True,
         )
 
         for code, yf_symbol in zip(chunk, yf_symbols):
