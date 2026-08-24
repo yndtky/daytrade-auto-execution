@@ -80,6 +80,10 @@ def parse_args() -> argparse.Namespace:
         "--max_overhead_supply_ratio", type=float, default=None,
         help="エントリー価格〜利確目標の間に集中する出来高比率がこれを超えたら見送る(0〜1)",
     )
+    parser.add_argument(
+        "--min_industry_momentum_pct", type=float, default=None,
+        help="候補銘柄が属する業種の当日モメンタム(%%)がこれ未満なら見送る",
+    )
     parser.add_argument("--sweep", action="store_true", help="ATR倍率・リスクリワード比の感度分析を行う")
     parser.add_argument(
         "--rolling_folds", type=int, default=None,
@@ -375,11 +379,14 @@ def main() -> None:
     # 業種分散は「複数銘柄を同時に保有する」という概念があって初めて意味を持つため、
     # 銘柄ごとに独立した口座で回すプール方式(run_pooled_split_check)には渡さない。
     shared_kwargs = dict(strategy_kwargs)
-    if args.max_positions_per_industry is not None:
+    if args.max_positions_per_industry is not None or args.min_industry_momentum_pct is not None:
         from pipeline.universe import get_industry_map
 
         shared_kwargs["industry_by_ticker"] = get_industry_map()
-        shared_kwargs["max_positions_per_industry"] = args.max_positions_per_industry
+        if args.max_positions_per_industry is not None:
+            shared_kwargs["max_positions_per_industry"] = args.max_positions_per_industry
+        if args.min_industry_momentum_pct is not None:
+            shared_kwargs["min_industry_momentum_pct"] = args.min_industry_momentum_pct
     if args.correlation_window is not None and args.max_avg_correlation is not None:
         shared_kwargs["correlation_window"] = args.correlation_window
         shared_kwargs["max_avg_correlation"] = args.max_avg_correlation
@@ -406,7 +413,8 @@ def main() -> None:
         f"correlation_window={args.correlation_window} max_avg_correlation={args.max_avg_correlation} "
         f"target_portfolio_beta={args.target_portfolio_beta} max_drawdown_pct={args.max_drawdown_pct} "
         f"nikkei_crash_pct={args.nikkei_crash_pct} beta_weighted_halt_pct={args.beta_weighted_halt_pct} "
-        f"overhead_supply_window={args.overhead_supply_window} max_overhead_supply_ratio={args.max_overhead_supply_ratio}"
+        f"overhead_supply_window={args.overhead_supply_window} max_overhead_supply_ratio={args.max_overhead_supply_ratio} "
+        f"min_industry_momentum_pct={args.min_industry_momentum_pct}"
     )
 
     t0 = time.time()

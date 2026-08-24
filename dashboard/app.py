@@ -27,6 +27,7 @@ from pipeline.risk_management import (  # noqa: E402
     RISK_REWARD_RATIO,
     compute_risk_plan,
 )
+from pipeline.industry_momentum import compute_industry_momentum, compute_industry_volume_surge  # noqa: E402
 from pipeline.screen import ATTENTION_FLAGS, BETA_MAX, BETA_MIN, RANGE_52W_RECOVERY_THRESHOLD  # noqa: E402
 from storage.local_cache import latest_date, read_daily_metrics  # noqa: E402
 
@@ -118,6 +119,54 @@ with st.expander("各指標の見方(はじめての方はこちら)", expanded=
 - **本日の注目銘柄**: RSI・OBVダイバージェンス・ゴールデンクロス接近のうち2つ以上が重なった銘柄。あくまで「今日チェックする価値がある」候補であり、買い・売りの指示ではありません
         """
     )
+
+st.subheader("業種別モメンタム・出来高(33業種)")
+st.caption(
+    "外部サイトのスクレイピングやkabuステーションAPIの業種別指数は使わず、このツールが既に毎日取得している"
+    "全銘柄の終値・出来高から計算(2026-08-25追加)。バックテストで売買条件への組み込みは検証済みだが、"
+    "期間によって効果が一貫せず不採用と判断したため、ここでは参考情報としての表示のみ。"
+)
+
+
+@st.cache_data(ttl=300)
+def _load_industry_momentum(current_date: str):
+    all_dates = sorted(read_daily_metrics()["date"].unique())
+    if current_date not in all_dates or all_dates.index(current_date) == 0:
+        return None, None
+    idx = all_dates.index(current_date)
+    prev_date = all_dates[idx - 1]
+    today_df = read_daily_metrics(current_date)
+    prev_df = read_daily_metrics(prev_date)
+    momentum = compute_industry_momentum(today_df, prev_df)
+
+    recent_dates = all_dates[max(0, idx - 5) : idx + 1]
+    recent_df = pd.concat([read_daily_metrics(d) for d in recent_dates], ignore_index=True)
+    surge = compute_industry_volume_surge(today_df, recent_df)
+    return momentum, surge
+
+
+industry_momentum, industry_surge = _load_industry_momentum(date)
+if industry_momentum is None:
+    st.info("前営業日のデータがまだ無いため、業種別モメンタムは翌営業日以降に表示されます。")
+else:
+    col_a, col_b = st.columns(2)
+    with col_a:
+        st.markdown("**モメンタム上位/下位(業種内平均リターン)**")
+        top5 = industry_momentum.head(5)
+        bottom5 = industry_momentum.tail(5).sort_values("momentum_pct")
+        st.dataframe(
+            pd.concat([top5, bottom5]).style.format({"momentum_pct": "{:+.2f}%"}),
+            hide_index=True, use_container_width=True,
+        )
+    with col_b:
+        st.markdown("**売買代金 急増業種(直近5日平均比)**")
+        if industry_surge.empty:
+            st.caption("データ不足のため計算できません")
+        else:
+            st.dataframe(
+                industry_surge.head(5)[["industry", "surge_ratio"]].style.format({"surge_ratio": "{:.2f}倍"}),
+                hide_index=True, use_container_width=True,
+            )
 
 price_min_all = int(df["close"].min())
 price_max_all = int(df["close"].max())

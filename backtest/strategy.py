@@ -76,6 +76,11 @@ class ShortlistStrategy(bt.Strategy):
         # 指定した時だけ有効(未指定なら従来通り無効)。
         ("overhead_supply_window", None),
         ("max_overhead_supply_ratio", None),
+        # 業種モメンタムフィルター(2026-08-25追加、デフォルト無効): 候補銘柄が属する業種の
+        # 当日モメンタム(業種内銘柄の当日リターンの単純平均)が閾値未満なら見送る。外部データ
+        # (スクレイピング・kabuステーションAPIの業種別指数)を新たに使わず、既に読み込み済みの
+        # 各銘柄のclose[0]/close[-1]から都度計算する(新しいデータ列は不要)。
+        ("min_industry_momentum_pct", None),
     )
 
     def __init__(self):
@@ -157,6 +162,24 @@ class ShortlistStrategy(bt.Strategy):
         in_band = volumes[(closes >= lower) & (closes < upper)].sum()
         return float(in_band / total)
 
+    def _industry_momentum(self) -> dict:
+        """本日時点の業種別モメンタム(当日リターンの業種内単純平均、%)。"""
+        sums: dict = {}
+        counts: dict = {}
+        for d in self.datas:
+            if len(d) < 2:
+                continue
+            industry = self.p.industry_by_ticker.get(d._name)
+            if industry is None:
+                continue
+            prev_close = d.close[-1]
+            if prev_close <= 0:
+                continue
+            ret = (d.close[0] / prev_close - 1) * 100
+            sums[industry] = sums.get(industry, 0.0) + ret
+            counts[industry] = counts.get(industry, 0) + 1
+        return {k: sums[k] / counts[k] for k in sums}
+
     def _check_halt_new_entries(self, today: str) -> bool:
         """新規エントリーを停止すべきか判定する(既存ポジションの決済には影響しない)。"""
         value = self.broker.getvalue()
@@ -192,6 +215,8 @@ class ShortlistStrategy(bt.Strategy):
         if self._check_halt_new_entries(today):
             return  # 新規エントリーのみ停止。既存ポジションのブラケット注文(損切り/利確)は生きたまま
 
+        industry_momentum = self._industry_momentum() if self.p.min_industry_momentum_pct is not None else {}
+
         for d in self.datas:
             name = d._name
             if self.getposition(d).size:
@@ -213,6 +238,11 @@ class ShortlistStrategy(bt.Strategy):
                 avg_corr = self._avg_correlation_with_holdings(d)
                 if avg_corr is not None and avg_corr > self.p.max_avg_correlation:
                     continue  # 保有中の銘柄群と値動きが似すぎているので見送る
+
+            if self.p.min_industry_momentum_pct is not None and industry is not None:
+                momentum = industry_momentum.get(industry)
+                if momentum is not None and momentum < self.p.min_industry_momentum_pct:
+                    continue  # 属する業種の当日モメンタムが弱いので見送る
 
             entry_price = float(d.close[0])
             atr = float(d.atr14[0])
