@@ -75,6 +75,11 @@ def parse_args() -> argparse.Namespace:
         "--target_portfolio_beta", type=float, default=None,
         help="保有中銘柄の加重平均βがこれを超えたら、新規ポジションのサイズを比例的に縮小する",
     )
+    parser.add_argument("--overhead_supply_window", type=int, default=None, help="やれやれ売りフィルターの出来高集計期間(日数)")
+    parser.add_argument(
+        "--max_overhead_supply_ratio", type=float, default=None,
+        help="エントリー価格〜利確目標の間に集中する出来高比率がこれを超えたら見送る(0〜1)",
+    )
     parser.add_argument("--sweep", action="store_true", help="ATR倍率・リスクリワード比の感度分析を行う")
     parser.add_argument(
         "--rolling_folds", type=int, default=None,
@@ -380,6 +385,9 @@ def main() -> None:
         shared_kwargs["max_avg_correlation"] = args.max_avg_correlation
     if args.target_portfolio_beta is not None:
         shared_kwargs["target_portfolio_beta"] = args.target_portfolio_beta
+    if args.overhead_supply_window is not None and args.max_overhead_supply_ratio is not None:
+        shared_kwargs["overhead_supply_window"] = args.overhead_supply_window
+        shared_kwargs["max_overhead_supply_ratio"] = args.max_overhead_supply_ratio
     if args.max_drawdown_pct is not None:
         shared_kwargs["max_drawdown_pct"] = args.max_drawdown_pct
     if args.nikkei_crash_pct is not None or args.beta_weighted_halt_pct is not None:
@@ -397,7 +405,8 @@ def main() -> None:
         f"trailing_stop={args.trailing_stop} max_positions_per_industry={args.max_positions_per_industry} "
         f"correlation_window={args.correlation_window} max_avg_correlation={args.max_avg_correlation} "
         f"target_portfolio_beta={args.target_portfolio_beta} max_drawdown_pct={args.max_drawdown_pct} "
-        f"nikkei_crash_pct={args.nikkei_crash_pct} beta_weighted_halt_pct={args.beta_weighted_halt_pct}"
+        f"nikkei_crash_pct={args.nikkei_crash_pct} beta_weighted_halt_pct={args.beta_weighted_halt_pct} "
+        f"overhead_supply_window={args.overhead_supply_window} max_overhead_supply_ratio={args.max_overhead_supply_ratio}"
     )
 
     t0 = time.time()

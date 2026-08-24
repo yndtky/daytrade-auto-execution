@@ -67,6 +67,15 @@ class ShortlistStrategy(bt.Strategy):
         # (scale = target_portfolio_beta / current_portfolio_beta、上限1.0)。
         # 保有が無い、またはまだ目標β以下の時は縮小しない(=risk_pctそのまま)。
         ("target_portfolio_beta", None),
+        # 「やれやれ売り」フィルター(2026-08-20追加、デフォルト無効): 過去にその価格帯で
+        # 買って含み損を抱えていた投資家が、株価が戻ってきたところで(やっと)売る、という
+        # 戻り売り圧力を、出来高の過去の集中度で近似する。日中の値幅データが無いため、
+        # 各日の出来高をその日の終値1点に割り当てる簡易版ボリュームプロファイル。
+        # エントリー価格〜利確目標の間にこの「壁」が厚い候補は見送る(利確ラインまで
+        # 届きにくいと判断)。overhead_supply_window/max_overhead_supply_ratioの両方を
+        # 指定した時だけ有効(未指定なら従来通り無効)。
+        ("overhead_supply_window", None),
+        ("max_overhead_supply_ratio", None),
     )
 
     def __init__(self):
@@ -133,6 +142,21 @@ class ShortlistStrategy(bt.Strategy):
             return 1.0
         return self.p.target_portfolio_beta / current_beta
 
+    def _overhead_supply_ratio(self, d, lower: float, upper: float) -> float | None:
+        """直近overhead_supply_window営業日の出来高のうち、価格帯[lower, upper)にどれだけ
+        集中しているか(0〜1)。データ不足・出来高ゼロなら判定を素通りさせるNone。
+        """
+        window = self.p.overhead_supply_window
+        if len(d) < window:
+            return None
+        closes = np.array(d.close.get(size=window))
+        volumes = np.array(d.volume.get(size=window))
+        total = volumes.sum()
+        if total <= 0:
+            return None
+        in_band = volumes[(closes >= lower) & (closes < upper)].sum()
+        return float(in_band / total)
+
     def _check_halt_new_entries(self, today: str) -> bool:
         """新規エントリーを停止すべきか判定する(既存ポジションの決済には影響しない)。"""
         value = self.broker.getvalue()
@@ -197,6 +221,12 @@ class ShortlistStrategy(bt.Strategy):
 
             stop = rm.stop_loss_price(entry_price, atr, self.p.atr_multiplier)
             target = rm.take_profit_price(entry_price, stop, self.p.risk_reward_ratio)
+
+            if self.p.overhead_supply_window is not None and self.p.max_overhead_supply_ratio is not None:
+                supply_ratio = self._overhead_supply_ratio(d, entry_price, target)
+                if supply_ratio is not None and supply_ratio > self.p.max_overhead_supply_ratio:
+                    continue  # エントリー〜利確目標の間に「やれやれ売り」の壁が厚いので見送る
+
             capital = self.broker.getvalue()
             effective_risk_pct = self.p.risk_pct * self._risk_pct_scale()
             shares = rm.position_size_shares(capital, effective_risk_pct, entry_price, stop, self.p.lot_size)
