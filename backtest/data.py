@@ -29,6 +29,7 @@ def fetch_history(ticker: str, years: int) -> pd.DataFrame:
         interval="1d",
         progress=False,
         auto_adjust=True,
+        actions=True,
     )
     if isinstance(data.columns, pd.MultiIndex):
         data.columns = data.columns.get_level_values(0)
@@ -66,6 +67,7 @@ def fetch_history_bulk(tickers: list[str], years: int) -> dict[str, pd.DataFrame
             threads=True,
             progress=False,
             auto_adjust=True,
+            actions=True,
         )
 
         for code, yf_symbol in zip(chunk, yf_symbols):

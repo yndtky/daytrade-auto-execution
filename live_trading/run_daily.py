@@ -46,6 +46,7 @@ if hasattr(sys.stdout, "reconfigure"):
 
 from . import storage
 from .client import ORDER_STATE_FINISHED, KabuStationClient, KabuStationError
+from .notify_discord import send_performance_report
 from pipeline import risk_management as rm
 from pipeline.fetch_prices import fetch_nikkei225_index
 from pipeline.universe import get_industry_map, get_supervised_tickers
@@ -212,12 +213,23 @@ def check_halt(account_value: float, nikkei_return: float, portfolio_beta: float
     return False, None
 
 
-def run(today: str | None = None, production: bool = False, base_url: str | None = None) -> None:
+def run(
+    today: str | None = None,
+    production: bool = False,
+    base_url: str | None = None,
+    session_label: str = "手動",
+) -> None:
     """base_urlはテスト用(tests/mock_kabu_server.py)にAPIサーバーの向き先を差し替えるためのもの。
-    通常は指定しない。
+    通常は指定しない。session_labelは1日に複数回(前場引け後・後場引け後など)呼ばれる想定での
+    ラベル(pipeline.run_dailyと同じパターン)。Discordへの運用成果通知の見出しに使う。
     """
     today = today or dt.date.today().isoformat()
     print(f"=== live_trading 実行開始 (date={today}, 環境={'本番' if production else '検証用'}) ===")
+
+    # Discord通知用に「前回記録された口座評価額」を、今回のdaily_runs書き込み前に取っておく
+    previous_runs = storage.read_daily_runs(limit=1)
+    previous_value = float(previous_runs.iloc[0]["account_value"]) if not previous_runs.empty else None
+    opened_today: list[str] = []
 
     client = KabuStationClient(production=production, base_url=base_url)
     client.authenticate()
@@ -271,8 +283,19 @@ def run(today: str | None = None, production: bool = False, base_url: str | None
     print(f"口座評価額: {account_value:,.0f}円(現金{cash:,.0f}円 + 保有株評価額{holdings_value:,.0f}円)")
     print(f"日経平均当日リターン: {nikkei_return:+.2f}% ／ 保有銘柄の加重平均β: {portfolio_beta:.2f}")
 
+    all_positions = storage.read_all_positions()
+    closed_today = (
+        all_positions[all_positions["closed_date"] == today][["ticker", "close_reason"]].to_dict("records")
+        if not all_positions.empty else []
+    )
+    open_count = len(storage.read_open_positions())
+
     if halted:
         print(f"⚠ 新規エントリーを停止(理由: {halt_reason})。既存ポジションの損切り・利確注文はそのまま有効。")
+        send_performance_report(
+            today, session_label, account_value, cash, holdings_value, previous_value,
+            open_count, opened_today, closed_today, halted, halt_reason,
+        )
         return
 
     industry_position_count: dict[str, int] = {}
@@ -344,6 +367,7 @@ def run(today: str | None = None, production: bool = False, base_url: str | None
                 continue
             storage.log_order(today, ticker, "BUY", shares, entry_price, order_id, "SENT")
             storage.open_position(ticker, today, order_id, shares, entry_price, stop, target)
+            opened_today.append(ticker)
             remaining_cash -= shares * entry_price
             print(
                 f"発注: 買い {ticker} {shares}株 @ {entry_price}円(注文ID: {order_id}、"
@@ -354,6 +378,14 @@ def run(today: str | None = None, production: bool = False, base_url: str | None
         except KabuStationError as e:
             storage.log_order(today, ticker, "BUY", shares, entry_price, None, "ERROR", note=str(e))
             print(f"⚠ 発注失敗 {ticker}: {e}")
+
+    # エントリー走査で口座評価額そのものは変わらない(発注段階ではまだ約定していない)ため、
+    # account_value/cashは上で計算した値のまま通知する。open_countだけは新規発注分を反映する。
+    open_count = len(storage.read_open_positions())
+    send_performance_report(
+        today, session_label, account_value, cash, holdings_value, previous_value,
+        open_count, opened_today, closed_today, halted, halt_reason,
+    )
 
     print("=== live_trading 実行完了 ===")
 
