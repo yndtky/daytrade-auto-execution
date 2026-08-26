@@ -390,7 +390,12 @@ def run(
     print("=== live_trading 実行完了 ===")
 
 
-def run_safely(today: str | None = None, production: bool = False, base_url: str | None = None) -> None:
+def run_safely(
+    today: str | None = None,
+    production: bool = False,
+    base_url: str | None = None,
+    session_label: str = "手動",
+) -> None:
     """run()を例外から保護し、多重起動を防ぐラッパー。
 
     - 多重起動防止: ロックファイルを取得できなければ、それだけを理由に即座に中止する
@@ -402,7 +407,7 @@ def run_safely(today: str | None = None, production: bool = False, base_url: str
     run_date = today or dt.date.today().isoformat()
     _acquire_lock()  # 既に実行中ならここで例外を投げてそのまま終了(ロックは取得できていないので解放不要)
     try:
-        run(today=run_date, production=production, base_url=base_url)
+        run(today=run_date, production=production, base_url=base_url, session_label=session_label)
     except Exception as e:  # noqa: BLE001
         print(f"⚠ live_trading実行中に予期しないエラーで停止: {e}")
         try:

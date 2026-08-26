@@ -192,11 +192,16 @@ class KabuStationClient:
         raise last_error
 
     def get_cash_balance(self) -> float:
-        """現物買付可能額(円)。公式OpenAPI仕様で確認済みのフィールド名(StockAccountWallet)。"""
+        """現物買付可能額(円)。公式OpenAPI仕様で確認済みのフィールド名(StockAccountWallet)。
+
+        2026-08-25、実機(検証用環境)で確認: 未入金の口座ではStockAccountWalletがnullで
+        返ってくる(0ではない)。フィールド自体は存在するのでnullをNone扱いせず0.0として扱う。
+        """
         data = self._request("GET", "/wallet/cash")
         if "StockAccountWallet" not in data:
             raise KabuStationError(f"想定していたフィールド(StockAccountWallet)がレスポンスにありません: {data}")
-        return float(data["StockAccountWallet"])
+        value = data["StockAccountWallet"]
+        return float(value) if value is not None else 0.0
 
     def get_positions(self, symbol: str | None = None) -> list[dict]:
         """保有中の建玉一覧。product=1で現物のみに絞る。addinfo=trueで各建玉に
