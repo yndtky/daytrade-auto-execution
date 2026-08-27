@@ -20,7 +20,11 @@ from . import setup_ca_bundle
 truststore.inject_into_ssl()
 
 _BUNDLE = setup_ca_bundle.BUNDLE_PATH
-_MAX_AGE_DAYS = 30
+# 2026-08-28: 14日経過した時点でセキュリティソフトの検査用証明書が更新されており、
+# 古いバンドルではTLS検証に失敗する(yfinance/curl_cffi経由の通信が原因不明のまま
+# 全滅し、「possibly delisted」という紛らわしいエラーで長時間気づけなかった)ことが
+# 判明したため、30日から短縮。
+_MAX_AGE_DAYS = 7
 
 if not _BUNDLE.exists() or (
     dt.datetime.now() - dt.datetime.fromtimestamp(_BUNDLE.stat().st_mtime)
