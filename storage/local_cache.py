@@ -24,7 +24,10 @@ CREATE TABLE IF NOT EXISTS daily_metrics (
     rsi14 REAL,
     rsi_flag INTEGER,
     obv_divergence_flag INTEGER,
+    bearish_obv_divergence_flag INTEGER,
     buy_pressure_score REAL,
+    volume_poc_price REAL,
+    volume_poc_distance_pct REAL,
     golden_cross_flag INTEGER,
     golden_cross_recent_flag INTEGER,
     uptrend_turning_flag INTEGER,
@@ -54,6 +57,11 @@ CREATE TABLE IF NOT EXISTS daily_metrics (
 # ALTER TABLEで移行する(列が既にあればsqlite3.OperationalErrorを無視するだけでよい)。
 _MIGRATIONS = (
     "ALTER TABLE daily_metrics ADD COLUMN dividend_per_share REAL",
+    # 2026-08-29追加: だまし上げ警戒フラグ・出来高集中ゾーン(POC近似)。表示専用の参考指標で、
+    # エントリー/エグジット判定のロジックには使わない。
+    "ALTER TABLE daily_metrics ADD COLUMN bearish_obv_divergence_flag INTEGER",
+    "ALTER TABLE daily_metrics ADD COLUMN volume_poc_price REAL",
+    "ALTER TABLE daily_metrics ADD COLUMN volume_poc_distance_pct REAL",
 )
 
 
@@ -86,7 +94,8 @@ def upsert_daily_metrics(df: pd.DataFrame) -> None:
     """dfは daily_metrics のカラムを含む必要がある。同じ(date, ticker)は上書き。"""
     cols = [
         "date", "ticker", "name", "industry", "is_manufacturing", "close", "volume", "dividend_per_share", "rsi14", "rsi_flag",
-        "obv_divergence_flag", "buy_pressure_score",
+        "obv_divergence_flag", "bearish_obv_divergence_flag", "buy_pressure_score",
+        "volume_poc_price", "volume_poc_distance_pct",
         "golden_cross_flag", "golden_cross_recent_flag", "uptrend_turning_flag",
         "liquidity_ok", "ytd_decline_pct", "sold_more_than_nikkei_flag",
         "range_position_52w", "is_nikkei225", "beta", "correlation",

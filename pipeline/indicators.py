@@ -13,6 +13,9 @@ GOLDEN_CROSS_LOOKBACK = 3  # ギャップ縮小・傾き判定に使う直近営
 
 OBV_LOOKBACK = 10
 
+VOLUME_PROFILE_WINDOW = 60  # 出来高集中ゾーン(POC近似)の計算期間
+VOLUME_PROFILE_BINS = 20
+
 LIQUIDITY_LOOKBACK = 20
 LIQUIDITY_MIN_AVG_TURNOVER_JPY = 50_000_000  # 直近20営業日の平均売買金額の下限(初期値、調整可)
 
@@ -78,6 +81,61 @@ def obv_divergence_flag(close: pd.Series, volume: pd.Series, window: int = OBV_L
     price_slope = _zscore_slope(close, window)
     obv_slope = _zscore_slope(obv, window)
     return bool(price_slope < 0 and obv_slope > price_slope)
+
+
+def bearish_obv_divergence_flag(close: pd.Series, volume: pd.Series, window: int = OBV_LOOKBACK) -> bool:
+    """直近window営業日で株価が上昇しているが、OBVの傾きが株価の傾きより緩やか(または負)。
+
+    obv_divergence_flag(価格下落中に出来高の勢いが底堅い=反発の兆候)の逆で、こちらは
+    価格上昇中に出来高の買い勢いが伴っていない状態を示す。値段だけが吊り上がっていて
+    実需(出来高)の裏付けが弱い、見せかけの上昇("だまし上げ")の可能性を示す参考情報。
+    エントリー/エグジット判定には使わず、表示専用の警戒フラグとして扱う。
+    """
+    if len(close) < window + 1:
+        return False
+    obv = compute_obv(close, volume)
+    price_slope = _zscore_slope(close, window)
+    obv_slope = _zscore_slope(obv, window)
+    return bool(price_slope > 0 and obv_slope < price_slope)
+
+
+def volume_profile_poc(
+    close: pd.Series, volume: pd.Series, window: int = VOLUME_PROFILE_WINDOW, bins: int = VOLUME_PROFILE_BINS
+) -> float | None:
+    """直近window営業日の値幅をbins分割し、最も出来高が集中した価格帯の中心値を返す。
+
+    出来高プロファイルのPoint of Control(POC)の簡易近似。厚く売買された価格帯は
+    それだけ多くの参加者の買値・売値が集まっている水準であり、株価が戻ってきた際に
+    支持/抵抗として意識されやすいとされる。あくまで過去の出来高分布から機械的に
+    算出した参考値であり、実際に大口が防衛するラインを保証するものではない。
+    """
+    aligned = pd.concat([close, volume], axis=1, keys=["close", "volume"]).dropna().tail(window)
+    if len(aligned) < window:
+        return None
+    c = aligned["close"].to_numpy()
+    v = aligned["volume"].to_numpy()
+    if v.sum() <= 0:
+        return None
+    lo, hi = c.min(), c.max()
+    if hi == lo:
+        return float(lo)
+    edges = np.linspace(lo, hi, bins + 1)
+    bin_idx = np.clip(np.digitize(c, edges) - 1, 0, bins - 1)
+    volume_by_bin = np.zeros(bins)
+    for idx, vol in zip(bin_idx, v):
+        volume_by_bin[idx] += vol
+    top_bin = int(volume_by_bin.argmax())
+    return float((edges[top_bin] + edges[top_bin + 1]) / 2)
+
+
+def volume_poc_distance_pct(
+    close: pd.Series, volume: pd.Series, window: int = VOLUME_PROFILE_WINDOW, bins: int = VOLUME_PROFILE_BINS
+) -> float | None:
+    """現在値が出来高集中ゾーン(POC)からどれだけ離れているか(%)。正なら現在値がPOCより上。"""
+    poc = volume_profile_poc(close, volume, window, bins)
+    if poc is None or poc == 0:
+        return None
+    return float((close.iloc[-1] - poc) / poc * 100)
 
 
 def golden_cross_approaching_flag(
@@ -256,7 +314,10 @@ def compute_latest_metrics(df: pd.DataFrame) -> dict:
         "rsi14": rsi_latest,
         "rsi_flag": bool(rsi_latest > RSI_OVERBOUGHT or rsi_latest < RSI_OVERSOLD),
         "obv_divergence_flag": obv_divergence_flag(close, volume),
+        "bearish_obv_divergence_flag": bearish_obv_divergence_flag(close, volume),
         "buy_pressure_score": buy_pressure_score(close, volume),
+        "volume_poc_price": volume_profile_poc(close, volume),
+        "volume_poc_distance_pct": volume_poc_distance_pct(close, volume),
         "golden_cross_flag": golden_cross_approaching_flag(close),
         "golden_cross_recent_flag": golden_cross_recent_flag(close),
         "uptrend_turning_flag": uptrend_turning_flag(close),

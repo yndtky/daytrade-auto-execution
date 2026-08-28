@@ -18,7 +18,13 @@ import streamlit as st
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from pipeline.fetch_prices import fetch_ohlcv  # noqa: E402
-from pipeline.indicators import GOLDEN_CROSS_LONG_MA, GOLDEN_CROSS_SHORT_MA, compute_atr, compute_obv  # noqa: E402
+from pipeline.indicators import (  # noqa: E402
+    GOLDEN_CROSS_LONG_MA,
+    GOLDEN_CROSS_SHORT_MA,
+    compute_atr,
+    compute_obv,
+    volume_profile_poc,
+)
 from pipeline.parse_perplexity import split_by_ticker  # noqa: E402
 from pipeline.perplexity_templates import BATCH_SIZE, build_batch_prompt, build_batches  # noqa: E402
 from pipeline.risk_management import (  # noqa: E402
@@ -71,7 +77,7 @@ if date is None:
 df = read_daily_metrics(date)
 st.caption(f"データ日付: {date} ／ 対象: プライム市場 {len(df)}銘柄")
 
-flag_cols = ["rsi_flag", "obv_divergence_flag", "golden_cross_flag", "liquidity_ok"]
+flag_cols = ["rsi_flag", "obv_divergence_flag", "bearish_obv_divergence_flag", "golden_cross_flag", "liquidity_ok"]
 for c in flag_cols + ["golden_cross_recent_flag", "uptrend_turning_flag"]:
     df[c] = df[c].astype(bool)
 df["is_shortlisted"] = df["is_shortlisted"].astype(bool)
@@ -82,7 +88,7 @@ df["sold_more_than_nikkei_flag"] = df["sold_more_than_nikkei_flag"].astype(bool)
 
 df["buy_pressure_flag"] = df["buy_pressure_score"] > 0
 
-col1, col2, col3, col4, col5 = st.columns(5)
+col1, col2, col2b, col3, col4, col5 = st.columns(6)
 col1.metric(
     "RSI過熱/売られすぎ",
     int(df["rsi_flag"].sum()),
@@ -92,6 +98,11 @@ col2.metric(
     "OBVダイバージェンス",
     int(df["obv_divergence_flag"].sum()),
     help="値段は下がっているのに、出来高の勢い(OBV)はそこまで下がっていない状態。売り圧力が弱まってきている=そろそろ反発するかもしれない、という注目ポイント。「値段が下落中」の銘柄に限定した指標。",
+)
+col2b.metric(
+    "だまし上げ警戒",
+    int(df["bearish_obv_divergence_flag"].sum()),
+    help="値段は上がっているのに、出来高の買い勢い(OBV)がそこまで伴っていない状態。値段だけが吊り上がっていて実需の裏付けが弱い、見せかけの上昇(だまし上げ)の可能性がある警戒サイン。OBVダイバージェンスの逆(「値段が上昇中」の銘柄に限定)。参考情報であり、売買の指示ではありません。",
 )
 col3.metric(
     "買い優勢(方向問わず)",
@@ -114,6 +125,7 @@ with st.expander("各指標の見方(はじめての方はこちら)", expanded=
         """
 - **RSI過熱/売られすぎ**: 値段の行き過ぎ度を示す指標。買われすぎ・売られすぎのどちらも「反転しやすい」という意味で警戒サインとして扱う
 - **OBVダイバージェンス**: 値段が下がっているのに出来高の勢いはそこまで下がっていない銘柄(下落中限定)。売りが弱まってきている=反発の兆候かもしれない
+- **だまし上げ警戒**: 値段が上がっているのに出来高の買い勢いが伴っていない銘柄(上昇中限定)。実需の裏付けが弱い見せかけの上昇かもしれない、という警戒サイン。OBVダイバージェンスのちょうど逆
 - **買い優勢(方向問わず)**: OBVダイバージェンスと同じ考え方だが、値段が下落中かどうかを問わない広い指標。上昇中の銘柄でも買いの勢いが強ければ該当する
 - **ゴールデンクロス接近**: 短期的な値動きが、これから中期トレンドを上に抜けそうな気配がある銘柄
 - **本日の注目銘柄**: RSI・OBVダイバージェンス・ゴールデンクロス接近のうち2つ以上が重なった銘柄。あくまで「今日チェックする価値がある」候補であり、買い・売りの指示ではありません
@@ -218,6 +230,9 @@ FLAG_COLUMN_CONFIG = {
     ),
     "obv_divergence_flag": st.column_config.CheckboxColumn(
         "OBVダイバージェンス", help="値段は下落中だが出来高の勢いはそこまで落ちていない。反発の兆候かもしれない"
+    ),
+    "bearish_obv_divergence_flag": st.column_config.CheckboxColumn(
+        "だまし上げ警戒", help="値段は上昇中だが出来高の買い勢いが伴っていない。見せかけの上昇かもしれない(参考情報)"
     ),
     "golden_cross_flag": st.column_config.CheckboxColumn(
         "ゴールデンクロス接近", help="短期の値動きが中期トレンドを上に抜けそうな気配"
@@ -364,6 +379,20 @@ if target_ticker:
         st.line_chart(chart_df[["Close", "MA5", "MA25"]])
         st.caption("出来高の勢い(OBV) — 値段が下がってもOBVが下がっていなければ買いが強いサイン")
         st.line_chart(chart_df[["OBV"]])
+
+        poc_price = volume_profile_poc(chart_df["Close"], chart_df["Volume"])
+        if poc_price is not None:
+            current_price = float(chart_df["Close"].dropna().iloc[-1])
+            poc_distance_pct = (current_price - poc_price) / poc_price * 100
+            st.caption("出来高集中ゾーン(参考) — 直近60営業日で最も売買が厚かった価格帯")
+            poc_col1, poc_col2 = st.columns(2)
+            poc_col1.metric("出来高集中ゾーン中心値", f"{poc_price:,.0f}円")
+            poc_col2.metric("現在値からの乖離", f"{poc_distance_pct:+.1f}%")
+            st.caption(
+                "過去の出来高分布から機械的に算出した参考値です。厚く売買された価格帯は"
+                "支持/抵抗として意識されやすいと言われますが、実際にその水準で防衛される保証はありません。"
+                "売買の指示ではなく、あくまで参考情報です。"
+            )
 
         st.subheader("リスク管理計算機")
         st.caption(
